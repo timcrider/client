@@ -3,18 +3,18 @@ import * as Constants from '../constants/devices'
 import engine from '../engine'
 import {navigateUpOnUnchanged} from './router'
 import type {AsyncAction} from '../constants/types/flux'
-import type {incomingCallMapType, revoke_revokeDevice_rpc, device_deviceList_rpc, login_paperKey_rpc} from '../constants/types/flow-types'
+import type {incomingCallMapType, revoke_revokeDevice_rpc, device_deviceHistoryList_rpc, login_paperKey_rpc} from '../constants/types/flow-types'
 // import {loginTab} from '../constants/tabs'
 
 export function loadDevices () : AsyncAction {
-  return function (dispatch) {
+  return (dispatch, getState) => {
     dispatch({
       type: Constants.loadingDevices,
       payload: null
     })
 
-    const params : device_deviceList_rpc = {
-      method: 'device.deviceList',
+    const params : device_deviceHistoryList_rpc = {
+      method: 'device.deviceHistoryList',
       param: {},
       incomingCallMap: {},
       callback: (error, devices) => {
@@ -26,9 +26,27 @@ export function loadDevices () : AsyncAction {
             error: true
           })
         } else {
+          let currentDevice
+          try {
+            currentDevice = getState().config.extendedConfig.device.deviceID
+          } catch (e) {
+            console.warn("Couldn't find current device in store")
+          }
+
+          const devicesWithCurrent = devices
+          devicesWithCurrent.forEach(dev => {
+            console.log('DEV')
+            console.log(dev)
+            if (dev.device.deviceID === currentDevice) {
+              dev.currentDevice = true
+            } else {
+              dev.currentDevice = false
+            }
+          })
+
           dispatch({
             type: Constants.showDevices,
-            payload: devices,
+            payload: devicesWithCurrent,
             error: false
           })
         }
