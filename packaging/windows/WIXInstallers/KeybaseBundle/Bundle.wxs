@@ -95,11 +95,12 @@
                  Win64="yes"
                  />
 
-    <!-- Dokany Product Codes: v1.0.0-RC4.1 -->
+    <!-- Dokany Product Codes: v1.0.0-RC4.2 -->
+    
     <util:RegistrySearch Id="DokanUninstallx86"
                  Variable="DokanUninstallString"
                  Root="HKLM"
-                 Key="SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\{65A3A986-3DC3-0100-0000-160615162835}"
+                 Key="SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\{65A3A986-3DC3-0100-0000-160616123622}"
                  Value="UninstallString"
                  Format="raw"
                  />
@@ -108,7 +109,7 @@
                  Condition="NOT DokanUninstallString"        
                  Variable="DokanUninstallString"
                  Root="HKLM"
-                 Key="SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\{65A3A986-3DC3-0100-0000-160615162835}"
+                 Key="SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\{65A3A986-3DC3-0100-0000-160616123622}"
                  Value="UninstallString"
                  Format="raw"
                  Win64="yes"
@@ -119,7 +120,7 @@
                  Condition="NOT DokanUninstallString"        
                  Variable="DokanUninstallString"
                  Root="HKLM"
-                 Key="SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\{65A3A964-3DC3-0100-0000-160615162835}"
+                 Key="SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\{65A3A986-3DC3-0100-0000-160616123622}"
                  Value="UninstallString"
                  Format="raw"
                  />
@@ -128,7 +129,7 @@
                  Condition="NOT DokanUninstallString"
                  Variable="DokanUninstallString"
                  Root="HKLM"
-                 Key="SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\{65A3A964-3DC3-0100-0000-160615162835}"
+                 Key="SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\{65A3A986-3DC3-0100-0000-160616123622}"
                  Value="UninstallString"
                  Format="raw"
                  Win64="yes"
