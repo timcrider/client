@@ -149,7 +149,7 @@
       </ExePackage>
       
       <ExePackage
-        SourceFile="$(env.GOPATH)\bin\dokan-dev\dokan-v1.0.0-RC4.1\DokanSetup_redist.exe"
+        SourceFile="$(env.GOPATH)\bin\dokan-dev\dokan-v1.0.0-RC4.2\DokanSetup_redist.exe"
           InstallCommand="/quiet"
           UninstallCommand="/quiet /uninstall"
           DetectCondition="DokanUninstallString and NOT WixBundleAction=3"
