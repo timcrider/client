@@ -134,6 +134,25 @@
                  Format="raw"
                  Win64="yes"
                  />
+    
+    <util:RegistrySearch Id="TargetDokanUninstallKey"
+                 Variable="TargetDokanUninstallKey"
+                 Root="HKCU"
+                 Key="SOFTWARE\Keybase"
+                 Value="TargetDokanUninstallKey"
+                 Format="raw"
+                 />
+    <util:RegistrySearch Id="TargetDokanUninstallKey_64"
+                 Variable="TargetDokanUninstallKey"
+                 After="TargetDokanUninstallKey"
+                 Condition="NOT TargetDokanUninstallKey"
+                 Root="HKCU"
+                 Key="SOFTWARE\Keybase"
+                 Value="TargetDokanUninstallKey"
+                 Format="raw"
+                 Win64="yes"
+                 />
+
 
     <Chain>
       <!-- Run whatever quiet uninstaller we detected. With this hack, we can't distinguish
@@ -147,12 +166,20 @@
           Permanent="yes">
         <ExitCode Behavior="forceReboot"/>
       </ExePackage>
-      
+
+      <!-- DetectCondition is critical here, since on update this package will be invoked with /uninstall,
+           (WixBundleAction=3). We want to let it uninstall (condition true) if we know the target is different,
+           which the updater writes to the registry and we retrieve via TargetDokanUninstallKey. 
+           Otherwise, we block uninstall, so things will be nice and quiet. 
+           
+           Stated another way, we want DetectCondition to be always true after install except
+           if ( uninstalling and TargetDokanUninstallKey <> DokanUninstallString)
+        -->
       <ExePackage
         SourceFile="$(env.GOPATH)\bin\dokan-dev\dokan-v1.0.0-RC4.2\DokanSetup_redist.exe"
           InstallCommand="/quiet"
           UninstallCommand="/quiet /uninstall"
-          DetectCondition="DokanUninstallString and NOT WixBundleAction=3"
+          DetectCondition="DokanUninstallString and NOT (WixBundleAction=3 AND DokanUninstallString &lt;=&gt;= TargetDokanUninstallKey)"
           PerMachine="yes"
           Permanent="yes">
       </ExePackage>
