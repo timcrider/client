@@ -3,7 +3,8 @@
      xmlns:bal="http://schemas.microsoft.com/wix/BalExtension"
      xmlns:util="http://schemas.microsoft.com/wix/UtilExtension">
   <Bundle Name="Keybase" Version="$(env.KEYBASE_WINVER)" Manufacturer="Keybase, Inc." UpgradeCode="418432ab-0366-40fd-a396-8cc0c4200252">
-    <Variable Name="LOGPATH_PROP" Type="string" Value="$(var.KeybaseApps.TargetPath)" />
+    <Variable Name="DokanProduct64" Type="string" Value="{65A3A964-3DC3-0100-0000-160616123622}" />
+    <Variable Name="DokanProduct86" Type="string" Value="{65A3A986-3DC3-0100-0000-160616123622}" />
     <Log PathVariable="LOGPATH_PROP"/>
     <BootstrapperApplicationRef Id="WixStandardBootstrapperApplication.HyperlinkLicense">
       <bal:WixStandardBootstrapperApplication
@@ -100,7 +101,7 @@
     <util:RegistrySearch Id="DokanUninstallx86"
                  Variable="DokanUninstallString"
                  Root="HKLM"
-                 Key="SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\{65A3A986-3DC3-0100-0000-160616123622}"
+                 Key="SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\[DokanProduct86]"
                  Value="UninstallString"
                  Format="raw"
                  />
@@ -109,7 +110,7 @@
                  Condition="NOT DokanUninstallString"        
                  Variable="DokanUninstallString"
                  Root="HKLM"
-                 Key="SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\{65A3A964-3DC3-0100-0000-160616123622}"
+                 Key="SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\[DokanProduct86]"
                  Value="UninstallString"
                  Format="raw"
                  Win64="yes"
@@ -120,7 +121,7 @@
                  Condition="NOT DokanUninstallString"        
                  Variable="DokanUninstallString"
                  Root="HKLM"
-                 Key="SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\{65A3A986-3DC3-0100-0000-160616123622}"
+                 Key="SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\[DokanProduct64]"
                  Value="UninstallString"
                  Format="raw"
                  />
@@ -129,7 +130,7 @@
                  Condition="NOT DokanUninstallString"
                  Variable="DokanUninstallString"
                  Root="HKLM"
-                 Key="SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\{65A3A964-3DC3-0100-0000-160616123622}"
+                 Key="SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\[DokanProduct64]"
                  Value="UninstallString"
                  Format="raw"
                  Win64="yes"
@@ -173,13 +174,14 @@
            Otherwise, we block uninstall, so things will be nice and quiet. 
            
            Stated another way, we want DetectCondition to be always true after install except
-           if ( uninstalling and TargetDokanUninstallKey <> DokanUninstallString)
+           if ( uninstalling and TargetDokanUninstallKey <> [DokanUninstallCode])
         -->
       <ExePackage
         SourceFile="$(env.GOPATH)\bin\dokan-dev\dokan-v1.0.0-RC4.2\DokanSetup_redist.exe"
           InstallCommand="/quiet"
           UninstallCommand="/quiet /uninstall"
-          DetectCondition="DokanUninstallString and NOT (WixBundleAction=3 AND DokanUninstallString &lt;&gt; TargetDokanUninstallKey)"
+          DetectCondition="DokanUninstallString and NOT (WixBundleAction=3 AND ( TargetDokanUninstallKey &lt;&gt; DokanProduct64 AND 
+                                                                                 TargetDokanUninstallKey &lt;&gt; DokanProduct86 ))"
           PerMachine="yes"
           Permanent="yes">
       </ExePackage>
