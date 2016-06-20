@@ -4,6 +4,7 @@ set GO15VENDOREXPERIMENT=1
 
 :: for Jenkins
 if DEFINED WORKSPACE set GOPATH=%WORKSPACE%
+if NOT DEFINED DOKAN_PATH set DOKAN_PATH=%GOPATH%\bin\dokan-dev\dokan-v1.0.0-RC4.2
 
 echo %GOPATH%
 
@@ -21,8 +22,7 @@ go build -a -tags "prerelease production" -ldflags="-X github.com/keybase/client
 
 :: Then build kbfsdokan.
 :: First, sanity-check the hashes
-if NOT EXIST %GOPATH%\src\github.com\keybase\kbfs\dokan\dokan.lib copy %GOPATH%\bin\dokan-dev\dokan-v0.8.0\Win32\Release\dokan.lib %GOPATH%\src\github.com\keybase\kbfs\dokan
-if NOT EXIST %GOPATH%\src\github.com\keybase\kbfs\dokan\dokan1.lib copy %GOPATH%\bin\dokan-dev\dokan-v1.0.0-RC4.2\Win32\Release\dokan1.lib %GOPATH%\src\github.com\keybase\kbfs\dokan
+copy %DOKAN_PATH%\Win32\Release\dokan1.lib %GOPATH%\src\github.com\keybase\kbfs\dokan
 
 ::for /f "usebackq tokens=2*" %%i in (`powershell Get-FileHash -Algorithm sha1 %GOPATH%\src\github.com\keybase\kbfs\dokan\dokan.lib`) do set DOKANLIBHASH=%%i
 ::if NOT %DOKANLIBHASH%==1C9316A567B805C4A6ADAF0ABE1424FFFB36A3BD exit /B 1

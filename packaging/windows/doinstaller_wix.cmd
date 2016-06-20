@@ -11,6 +11,8 @@ set GOARCH=386
 set Folder=%GOPATH%\src\github.com\keybase\client\go\keybase\
 set PathName=%Folder%keybase.exe
 
+if NOT DEFINED DOKAN_PATH set DOKAN_PATH=%GOPATH%\bin\dokan-dev\dokan-v1.0.0-RC4.2
+
 pushd %GOPATH%\src\github.com\keybase\client\packaging\windows
 
 :: Capture the windows style version
@@ -25,7 +27,7 @@ set KEYBASE_VERSION=%SEMVER%
 
 :: dokan source binaries.
 :: There are 8 (4 windows versions times 32/64 bit) but they all seem to have the same version.
-for /f %%i in ('PowerShell "(Get-Item %GOPATH%\bin\dokan-dev\dokan-v1.0.0-RC4.2\Win32\Win10Release\dokan1.sys).VersionInfo.FileVersion"') do set DOKANVER=%%i
+for /f %%i in ('PowerShell "(Get-Item %DOKAN_PATH%\Win32\Win10Release\dokan1.sys).VersionInfo.FileVersion"') do set DOKANVER=%%i
 echo %DOKANVER%
 IF %DOKANVER%=="" (
   EXIT /B 1
