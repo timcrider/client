@@ -1,3 +1,6 @@
+// Copyright 2015 Keybase, Inc. All rights reserved. Use of
+// this source code is governed by the included BSD license.
+
 // A module for syncing secrets with the server, such as SKB PGP keys,
 // and server-halves of our various secret keys.
 package libkb
@@ -7,7 +10,7 @@ import (
 	"strings"
 	"sync"
 
-	keybase1 "github.com/keybase/client/protocol/go"
+	keybase1 "github.com/keybase/client/go/protocol"
 )
 
 type ServerPrivateKey struct {
@@ -30,6 +33,7 @@ type DeviceKey struct {
 	Status        int                  `json:"status"`
 	LksServerHalf string               `json:"lks_server_half"`
 	PPGen         PassphraseGeneration `json:"passphrase_generation"`
+	LastUsedTime  int64                `json:"last_used_time"`
 }
 
 func (d DeviceKey) Display() string {
@@ -61,9 +65,17 @@ type SecretSyncer struct {
 	keys  *ServerPrivateKeys
 }
 
-var DefaultDeviceTypes = map[string]bool{
+type DeviceTypeSet map[string]bool
+
+var DefaultDeviceTypes = DeviceTypeSet{
 	DeviceTypeDesktop: true,
 	DeviceTypeMobile:  true,
+}
+
+var AllDeviceTypes = DeviceTypeSet{
+	DeviceTypeDesktop: true,
+	DeviceTypeMobile:  true,
+	DeviceTypePaper:   true,
 }
 
 func NewSecretSyncer(g *GlobalContext) *SecretSyncer {
@@ -83,21 +95,35 @@ func (ss *SecretSyncer) loadFromStorage(uid keybase1.UID) (err error) {
 	var found bool
 	found, err = ss.G().LocalDb.GetInto(&tmp, ss.dbKey(uid))
 	ss.G().Log.Debug("| loadFromStorage -> found=%v, err=%s", found, ErrToOk(err))
-	if found {
-		ss.G().Log.Debug("| Loaded version %d", tmp.Version)
-	} else if err == nil {
+	if err != nil {
+		return err
+	}
+	if !found {
 		ss.G().Log.Debug("| Loaded empty record set")
+		return nil
 	}
-	if err == nil {
-		ss.keys = &tmp
+	if ss.cachedSyncedSecretsOutOfDate(&tmp) {
+		ss.G().Log.Debug("| Synced secrets out of date")
+		return nil
 	}
-	return
+
+	// only set ss.keys to something if found.
+	//
+	// This is part of keybase-issues#1783:  an (old) user with a synced
+	// private key fell back to gpg instead of using a synced key.
+	//
+
+	ss.G().Log.Debug("| Loaded version %d", tmp.Version)
+	ss.keys = &tmp
+
+	return nil
 }
 
 func (ss *SecretSyncer) syncFromServer(uid keybase1.UID, sr SessionReader) (err error) {
 	hargs := HTTPArgs{}
 
 	if ss.keys != nil {
+		ss.G().Log.Debug("| adding version %d to fetch_private call", ss.keys.Version)
 		hargs.Add("version", I{ss.keys.Version})
 	}
 	var res *APIRes
@@ -121,6 +147,8 @@ func (ss *SecretSyncer) syncFromServer(uid keybase1.UID, sr SessionReader) (err 
 		ss.G().Log.Debug("| upgrade to version -> %d", obj.Version)
 		ss.keys = &obj
 		ss.dirty = true
+	} else {
+		ss.G().Log.Debug("| not changing synced keys: synced version %d not newer than existing version %d", obj.Version, ss.keys.Version)
 	}
 
 	return
@@ -144,6 +172,9 @@ func (ss *SecretSyncer) store(uid keybase1.UID) (err error) {
 // FindActiveKey examines the synced keys, looking for one that's currently active.
 // Returns ret=nil if none was found.
 func (ss *SecretSyncer) FindActiveKey(ckf *ComputedKeyFamily) (ret *SKB, err error) {
+	if ss.keys == nil {
+		return nil, nil
+	}
 	for _, key := range ss.keys.PrivateKeys {
 		if ret, _ = key.FindActiveKey(ckf); ret != nil {
 			return
@@ -182,11 +213,11 @@ func (k *ServerPrivateKey) FindActiveKey(ckf *ComputedKeyFamily) (ret *SKB, err 
 
 func (ss *SecretSyncer) FindDevice(id keybase1.DeviceID) (DeviceKey, error) {
 	if ss.keys == nil {
-		return DeviceKey{}, fmt.Errorf("No device found for ID = %s", id)
+		return DeviceKey{}, fmt.Errorf("SecretSyncer: no device found for ID = %s", id)
 	}
 	dev, ok := ss.keys.Devices[id]
 	if !ok {
-		return DeviceKey{}, fmt.Errorf("No device found for ID = %s", id)
+		return DeviceKey{}, fmt.Errorf("SecretSyncer: no device found for ID = %s", id)
 	}
 	return dev, nil
 }
@@ -218,7 +249,7 @@ func (ss *SecretSyncer) dumpDevices() {
 
 // IsDeviceNameTaken returns true if a desktop or mobile device is
 // using a name already.
-func (ss *SecretSyncer) IsDeviceNameTaken(name string, includeTypesSet map[string]bool) bool {
+func (ss *SecretSyncer) IsDeviceNameTaken(name string, includeTypesSet DeviceTypeSet) bool {
 	devs, err := ss.ActiveDevices(includeTypesSet)
 	if err != nil {
 		return false
@@ -233,7 +264,7 @@ func (ss *SecretSyncer) IsDeviceNameTaken(name string, includeTypesSet map[strin
 
 // HasActiveDevice returns true if there is an active desktop or
 // mobile device available.
-func (ss *SecretSyncer) HasActiveDevice(includeTypesSet map[string]bool) (bool, error) {
+func (ss *SecretSyncer) HasActiveDevice(includeTypesSet DeviceTypeSet) (bool, error) {
 	devs, err := ss.ActiveDevices(includeTypesSet)
 	if err != nil {
 		return false, err
@@ -242,7 +273,7 @@ func (ss *SecretSyncer) HasActiveDevice(includeTypesSet map[string]bool) (bool, 
 }
 
 // ActiveDevices returns all the active desktop and mobile devices.
-func (ss *SecretSyncer) ActiveDevices(includeTypesSet map[string]bool) (DeviceKeyMap, error) {
+func (ss *SecretSyncer) ActiveDevices(includeTypesSet DeviceTypeSet) (DeviceKeyMap, error) {
 	if ss.keys == nil {
 		return nil, fmt.Errorf("no keys")
 	}
@@ -269,6 +300,19 @@ func (ss *SecretSyncer) DumpPrivateKeys() {
 		ss.G().Log.Info("Private key: %s", s)
 		ss.G().Log.Info("  -- kid: %s, keytype: %d, bits: %d, algo: %d", key.Kid, key.KeyType, key.KeyBits, key.KeyAlgo)
 	}
+}
+
+// As we add more fields to the data we're caching here, we need to detect the
+// cases where our cached data is missing the new fields. We can extend this
+// function with more cases as we add more fields.
+func (ss *SecretSyncer) cachedSyncedSecretsOutOfDate(cached *ServerPrivateKeys) bool {
+	for _, dev := range cached.Devices {
+		if dev.LastUsedTime == 0 {
+			ss.G().Log.Debug("cachedSyncedSecretsOutOfDate noticed a cached device with no last used time")
+			return true
+		}
+	}
+	return false
 }
 
 func (k ServerPrivateKey) ToSKB(gc *GlobalContext) (*SKB, error) {

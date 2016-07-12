@@ -1,48 +1,78 @@
+// Copyright 2015 Keybase, Inc. All rights reserved. Use of
+// this source code is governed by the included BSD license.
+
 package service
 
 import (
+	"errors"
+
 	"github.com/keybase/client/go/engine"
-	keybase1 "github.com/keybase/client/protocol/go"
-	"github.com/maxtaco/go-framed-msgpack-rpc/rpc2"
+	"github.com/keybase/client/go/libkb"
+	keybase1 "github.com/keybase/client/go/protocol"
+	rpc "github.com/keybase/go-framed-msgpack-rpc"
+	"golang.org/x/net/context"
 )
 
 // DeviceHandler is the RPC handler for the device interface.
 type DeviceHandler struct {
-	*CancelHandler
+	*BaseHandler
+	libkb.Contextified
 }
 
 // NewDeviceHandler creates a DeviceHandler for the xp transport.
-func NewDeviceHandler(xp *rpc2.Transport) *DeviceHandler {
-	return &DeviceHandler{CancelHandler: NewCancelHandler(xp)}
+func NewDeviceHandler(xp rpc.Transporter, g *libkb.GlobalContext) *DeviceHandler {
+	return &DeviceHandler{
+		BaseHandler:  NewBaseHandler(xp),
+		Contextified: libkb.NewContextified(g),
+	}
 }
 
-func (h *DeviceHandler) DeviceList(sessionID int) ([]keybase1.Device, error) {
-	ctx := &engine.Context{LogUI: h.getLogUI(sessionID)}
-	eng := engine.NewDevList(G)
+// DeviceList returns a list of all the devices for a user.
+func (h *DeviceHandler) DeviceList(_ context.Context, sessionID int) ([]keybase1.Device, error) {
+	ctx := &engine.Context{
+		LogUI:     h.getLogUI(sessionID),
+		SessionID: sessionID,
+	}
+	eng := engine.NewDevList(h.G())
 	if err := engine.RunEngine(eng, ctx); err != nil {
 		return nil, err
 	}
 	return eng.List(), nil
 }
 
-// DeviceAdd adds a sibkey using a SibkeyEngine.
-func (h *DeviceHandler) DeviceAdd(arg keybase1.DeviceAddArg) error {
-	locksmithUI := NewRemoteLocksmithUI(arg.SessionID, h.rpcClient())
-	ctx := &engine.Context{SecretUI: h.getSecretUI(arg.SessionID), LocksmithUI: locksmithUI}
-	eng := engine.NewKexSib(G, arg.SecretPhrase)
+// DeviceHistoryList returns a list of all the devices for a user,
+// with detailed history and provisioner, revoker information.
+func (h *DeviceHandler) DeviceHistoryList(nctx context.Context, sessionID int) ([]keybase1.DeviceDetail, error) {
+	ctx := &engine.Context{
+		LogUI:      h.getLogUI(sessionID),
+		NetContext: nctx,
+		SessionID:  sessionID,
+	}
+	eng := engine.NewDeviceHistorySelf(h.G())
+	if err := engine.RunEngine(eng, ctx); err != nil {
+		return nil, err
+	}
+	return eng.Devices(), nil
+}
 
-	h.setCanceler(arg.SessionID, eng)
-	defer h.removeCanceler(arg.SessionID)
-
+// DeviceAdd starts the kex2 device provisioning on the
+// provisioner (device X/C1)
+func (h *DeviceHandler) DeviceAdd(_ context.Context, sessionID int) error {
+	ctx := &engine.Context{
+		ProvisionUI: h.getProvisionUI(sessionID),
+		SecretUI:    h.getSecretUI(sessionID, h.G()),
+		SessionID:   sessionID,
+	}
+	eng := engine.NewDeviceAdd(h.G())
 	return engine.RunEngine(eng, ctx)
 }
 
-// DeviceAddCancel stops the device provisioning authorized with
-// DeviceAdd.
-func (h *DeviceHandler) DeviceAddCancel(sessionID int) error {
-	c := h.canceler(sessionID)
-	if c == nil {
-		return nil
+// CheckDeviceNameFormat verifies that the device name has a valid
+// format.
+func (h *DeviceHandler) CheckDeviceNameFormat(_ context.Context, arg keybase1.CheckDeviceNameFormatArg) (bool, error) {
+	ok := libkb.CheckDeviceName.F(arg.Name)
+	if ok {
+		return ok, nil
 	}
-	return c.Cancel()
+	return false, errors.New(libkb.CheckDeviceName.Hint)
 }

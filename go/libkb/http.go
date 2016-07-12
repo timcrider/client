@@ -1,6 +1,10 @@
+// Copyright 2015 Keybase, Inc. All rights reserved. Use of
+// this source code is governed by the included BSD license.
+
 package libkb
 
 import (
+	"encoding/base64"
 	"encoding/hex"
 	"fmt"
 	"net/url"
@@ -19,6 +23,10 @@ type S struct {
 
 func HexArg(b []byte) S {
 	return S{Val: hex.EncodeToString(b)}
+}
+
+func B64Arg(b []byte) S {
+	return S{Val: base64.StdEncoding.EncodeToString(b)}
 }
 
 type I struct {

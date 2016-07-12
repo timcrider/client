@@ -1,21 +1,24 @@
+// Copyright 2015 Keybase, Inc. All rights reserved. Use of
+// this source code is governed by the included BSD license.
+
 package client
 
 import (
-	"strings"
-
 	"github.com/keybase/client/go/libkb"
+	"strings"
 )
 
 type Field struct {
-	Name        string
-	Prompt      string
-	FirstPrompt string
-	Defval      string
-	Hint        string
-	Checker     *libkb.Checker
-	Thrower     func(key, value string) error
-	Disabled    bool
-	Value       *string
+	Name             string
+	Prompt           string
+	FirstPrompt      string
+	Defval           string
+	Hint             string
+	Checker          *libkb.Checker
+	Thrower          func(key, value string) error
+	Disabled         bool
+	Value            *string
+	PromptDescriptor libkb.PromptDescriptor
 }
 
 func (f Field) GetValue() string {
@@ -27,10 +30,11 @@ func (f Field) GetValue() string {
 
 type Prompter struct {
 	Fields []*Field
+	tui    libkb.TerminalUI
 }
 
-func NewPrompter(f []*Field) *Prompter {
-	return &Prompter{f}
+func NewPrompter(f []*Field, tui libkb.TerminalUI) *Prompter {
+	return &Prompter{Fields: f, tui: tui}
 }
 
 func (p *Prompter) Run() error {
@@ -58,8 +62,7 @@ func (p *Prompter) ReadField(f *Field) (err error) {
 
 	var val string
 
-	term := GlobUI.Terminal
-	if term == nil {
+	if p.tui == nil {
 		return NoTerminalError{}
 	}
 
@@ -91,7 +94,7 @@ func (p *Prompter) ReadField(f *Field) (err error) {
 		}
 		prompt += ": "
 
-		if val, err = term.Prompt(prompt); err != nil {
+		if val, err = p.tui.Prompt(f.PromptDescriptor, prompt); err != nil {
 			break
 		}
 

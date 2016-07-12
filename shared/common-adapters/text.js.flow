@@ -1,0 +1,46 @@
+/* @flow */
+
+import React, {Component} from 'react'
+import type {Context} from './terminal'
+
+export type Background = 'Normal' | 'Announcements' | 'Success' | 'Information' | 'HighRisk' | 'Documentation' | 'Terminal'
+
+export type TextType =
+    'HeaderJumbo' | 'HeaderBig' | 'Header' | 'HeaderError' | 'HeaderLink'
+  | 'Body' | 'BodySemibold' | 'BodyPrimaryLink'
+  | 'BodySmall' | 'BodySmallLink' | 'BodySmallError' | 'BodySmallPrimaryLink' | 'BodySmallSecondaryLink'
+  | 'BodyXSmall' | 'BodyXSmallLink'
+  | 'BodySmallSemibold'
+  | 'BodySemiboldItalic'
+  | 'BadgeNumber'
+  | 'Error'
+  | 'Terminal'
+  | 'TerminalUsername' | 'TerminalPublic' | 'TerminalPrivate'
+  | 'TerminalCommand' | 'TerminalComment' | 'TerminalEmpty' | 'TerminalSmall'
+
+export type Props = {
+  type: TextType,
+  backgroundMode?: Background,
+  inline?: boolean,
+  link?: boolean,
+  reversed?: boolean,
+  onClick?: (e: SyntheticEvent) => void,
+  lineClamp?: number,
+  style?: Object,
+  children?: React$Element,
+  className?: string,
+  contentEditable?: boolean,
+  onKeyDown?: (e: SyntheticEvent) => void,
+  onKeyUp?: (e: SyntheticEvent) => void
+}
+
+declare export default class Text extends React.Component {
+  props: Props;
+  static _colorStyleBackgroundMode: (backgroundMode: Background, type: Props.type) => {color?: string};
+  static _inlineStyle: (type: Props.type, context: Context) => Object;
+}
+
+declare export var styles: Object
+declare export var specialStyles: Object
+
+declare function lineClamp (lines: number): Object

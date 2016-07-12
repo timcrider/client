@@ -1,47 +1,52 @@
+// Copyright 2015 Keybase, Inc. All rights reserved. Use of
+// this source code is governed by the included BSD license.
+
 package client
 
 import (
 	"fmt"
-
 	"github.com/keybase/client/go/libkb"
 	"github.com/keybase/client/go/pinentry"
-	keybase1 "github.com/keybase/client/protocol/go"
+	keybase1 "github.com/keybase/client/go/protocol"
+	"io"
 )
 
 type SecretEntry struct {
+	libkb.Contextified
 	pinentry *pinentry.Pinentry
 	terminal *Terminal
 	initRes  *error
+	tty      string
 }
 
-type Printer interface {
-	Printf(format string, a ...interface{}) (n int, err error)
-}
-
-func NewSecretEntry(t *Terminal) *SecretEntry {
-	return &SecretEntry{terminal: t}
+func NewSecretEntry(g *libkb.GlobalContext, t *Terminal, tty string) *SecretEntry {
+	return &SecretEntry{
+		Contextified: libkb.NewContextified(g),
+		terminal:     t,
+		tty:          tty,
+	}
 }
 
 func (se *SecretEntry) Init() (err error) {
 
-	G.Log.Debug("+ SecretEntry.Init()")
+	se.G().Log.Debug("+ SecretEntry.Init()")
 
 	if se.initRes != nil {
-		G.Log.Debug("- SecretEntry.Init() -> cached %s", libkb.ErrToOk(*se.initRes))
+		se.G().Log.Debug("- SecretEntry.Init() -> cached %s", libkb.ErrToOk(*se.initRes))
 		return *se.initRes
 	}
 
-	if G.Env.GetNoPinentry() {
-		G.Log.Debug("| Pinentry skipped due to config")
+	if se.G().Env.GetNoPinentry() {
+		se.G().Log.Debug("| Pinentry skipped due to config")
 	} else {
-		pe := pinentry.New(G.Env.GetPinentry(), G.Log)
+		pe := pinentry.New(se.G().Env.GetPinentry(), se.G().Log, se.tty)
 		if e2, fatalerr := pe.Init(); fatalerr != nil {
 			err = fatalerr
 		} else if e2 != nil {
-			G.Log.Debug("| Pinentry initialization failed: %s", e2)
+			se.G().Log.Debug("| Pinentry initialization failed: %s", e2)
 		} else {
 			se.pinentry = pe
-			G.Log.Debug("| Pinentry initialized")
+			se.G().Log.Debug("| Pinentry initialized")
 		}
 	}
 
@@ -53,11 +58,11 @@ func (se *SecretEntry) Init() (err error) {
 
 	se.initRes = &err
 
-	G.Log.Debug("- SecretEntry.Init() -> %s", libkb.ErrToOk(err))
+	se.G().Log.Debug("- SecretEntry.Init() -> %s", libkb.ErrToOk(err))
 	return err
 }
 
-func (se *SecretEntry) Get(arg keybase1.SecretEntryArg, termArg *keybase1.SecretEntryArg, printer Printer) (res *keybase1.SecretEntryRes, err error) {
+func (se *SecretEntry) Get(arg keybase1.SecretEntryArg, termArg *keybase1.SecretEntryArg, w io.Writer) (res *keybase1.SecretEntryRes, err error) {
 
 	if err = se.Init(); err != nil {
 		return
@@ -65,7 +70,7 @@ func (se *SecretEntry) Get(arg keybase1.SecretEntryArg, termArg *keybase1.Secret
 
 	if pe := se.pinentry; pe != nil {
 		if len(arg.Reason) > 0 {
-			printer.Printf("Collecting your passphrase for %s.\n", arg.Reason)
+			fmt.Fprintf(w, "Collecting your passphrase for %s.\n", arg.Reason)
 		}
 		res, err = pe.Get(arg)
 	} else if se.terminal == nil {

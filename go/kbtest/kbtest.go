@@ -1,3 +1,6 @@
+// Copyright 2015 Keybase, Inc. All rights reserved. Use of
+// this source code is governed by the included BSD license.
+
 package kbtest
 
 import (
@@ -55,10 +58,14 @@ func CreateAndSignupFakeUser(prefix string, g *libkb.GlobalContext) (*FakeUser, 
 		LogUI:    g.UI.GetLogUI(),
 		GPGUI:    &gpgtestui{},
 		SecretUI: fu.NewSecretUI(),
-		LoginUI:  libkb.TestLoginUI{Username: fu.Username},
+		LoginUI:  &libkb.TestLoginUI{Username: fu.Username},
 	}
 	s := engine.NewSignupEngine(&arg, g)
 	if err := engine.RunEngine(s, ctx); err != nil {
+		return nil, err
+	}
+	fu.User, err = libkb.LoadUser(libkb.NewLoadUserByNameArg(g, fu.Username))
+	if err != nil {
 		return nil, err
 	}
 	return fu, nil

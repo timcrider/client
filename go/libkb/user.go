@@ -1,18 +1,25 @@
+// Copyright 2015 Keybase, Inc. All rights reserved. Use of
+// this source code is governed by the included BSD license.
+
 package libkb
 
 import (
 	"fmt"
 	"io"
 
-	keybase1 "github.com/keybase/client/protocol/go"
+	keybase1 "github.com/keybase/client/go/protocol"
 	jsonw "github.com/keybase/go-jsonw"
 )
+
+type UserBasic interface {
+	GetUID() keybase1.UID
+	GetName() string
+}
 
 type User struct {
 	// Raw JSON element read from the server or our local DB.
 	basics     *jsonw.Wrapper
 	publicKeys *jsonw.Wrapper
-	sigs       *jsonw.Wrapper
 	pictures   *jsonw.Wrapper
 
 	// Processed fields
@@ -45,7 +52,7 @@ func NewUser(g *GlobalContext, o *jsonw.Wrapper) (*User, error) {
 		return nil, fmt.Errorf("user object for %s lacks a name", uid)
 	}
 
-	kf, err := ParseKeyFamily(o.AtKey("public_keys"))
+	kf, err := ParseKeyFamily(g, o.AtKey("public_keys"))
 	if err != nil {
 		return nil, err
 	}
@@ -53,7 +60,6 @@ func NewUser(g *GlobalContext, o *jsonw.Wrapper) (*User, error) {
 	return &User{
 		basics:       o.AtKey("basics"),
 		publicKeys:   o.AtKey("public_keys"),
-		sigs:         o.AtKey("sigs"),
 		pictures:     o.AtKey("pictures"),
 		keyFamily:    kf,
 		id:           uid,
@@ -100,6 +106,13 @@ func (u *User) GetComputedKeyInfos() *ComputedKeyInfos {
 		return nil
 	}
 	return u.sigChain().GetComputedKeyInfos()
+}
+
+func (u *User) GetSigHintsVersion() int {
+	if u.sigHints == nil {
+		return 0
+	}
+	return u.sigHints.version
 }
 
 func (u *User) GetComputedKeyFamily() (ret *ComputedKeyFamily) {
@@ -153,6 +166,18 @@ func (u *User) GetActivePGPKIDs(sibkey bool) (ret []keybase1.KID) {
 	return
 }
 
+func (u *User) GetDeviceSibkey() (GenericKey, error) {
+	did := u.G().Env.GetDeviceID()
+	if did.IsNil() {
+		return nil, NotProvisionedError{}
+	}
+	ckf := u.GetComputedKeyFamily()
+	if ckf == nil {
+		return nil, KeyFamilyError{"no key family available"}
+	}
+	return ckf.GetSibkeyForDevice(did)
+}
+
 func (u *User) GetDeviceSubkey() (subkey GenericKey, err error) {
 	ckf := u.GetComputedKeyFamily()
 	if ckf == nil {
@@ -167,28 +192,11 @@ func (u *User) GetDeviceSubkey() (subkey GenericKey, err error) {
 	return ckf.GetEncryptionSubkeyForDevice(did)
 }
 
-func (u *User) GetServerSeqno() (i int, err error) {
-	i = -1
-
-	u.G().Log.Debug("+ Get server seqno for user: %s", u.name)
-	res, err := u.G().API.Get(APIArg{
-		Endpoint:    "user/lookup",
-		NeedSession: false,
-		Args: HTTPArgs{
-			"username": S{u.name},
-			"fields":   S{"sigs"},
-		},
-		Contextified: u.Contextified,
-	})
-	if err != nil {
-		return
+func (u *User) HasEncryptionSubkey() bool {
+	if ckf := u.GetComputedKeyFamily(); ckf != nil {
+		return ckf.HasActiveEncryptionSubkey()
 	}
-	i, err = res.Body.AtKey("them").AtKey("sigs").AtKey("last").AtKey("seqno").GetInt()
-	if err != nil {
-		return
-	}
-	u.G().Log.Debug("- Server seqno: %s -> %d", u.name, i)
-	return i, err
+	return false
 }
 
 func (u *User) CheckBasicsFreshness(server int64) (current bool, err error) {
@@ -213,15 +221,18 @@ func (u *User) StoreSigChain() error {
 }
 
 func (u *User) LoadSigChains(allKeys bool, f *MerkleUserLeaf, self bool) (err error) {
+	defer TimeLog(fmt.Sprintf("LoadSigChains: %s", u.name), u.G().Clock().Now(), u.G().Log.Debug)
+
 	loader := SigChainLoader{
 		user:         u,
 		self:         self,
 		allKeys:      allKeys,
 		leaf:         f,
 		chainType:    PublicChain,
-		preload:      u.sigChain(),
 		Contextified: u.Contextified,
+		preload:      u.sigChain(),
 	}
+
 	u.sigChainMem, err = loader.Load()
 
 	// Eventually load the others, but for now, this one is good enough
@@ -264,7 +275,6 @@ func (u *User) StoreTopLevel() error {
 	jw.SetKey("id", UIDWrapper(u.id))
 	jw.SetKey("basics", u.basics)
 	jw.SetKey("public_keys", u.publicKeys)
-	jw.SetKey("sigs", u.sigs)
 	jw.SetKey("pictures", u.pictures)
 
 	err := u.G().LocalDb.Put(
@@ -377,6 +387,13 @@ func (u *User) GetEldestKID() (ret keybase1.KID) {
 	return u.leaf.eldest
 }
 
+func (u *User) GetPublicChainTail() *MerkleTriple {
+	if u.sigChainMem == nil {
+		return nil
+	}
+	return u.sigChain().GetCurrentTailTriple()
+}
+
 func (u *User) IDTable() *IdentityTable {
 	return u.idTable
 }
@@ -390,7 +407,7 @@ func (u *User) MakeIDTable() error {
 	if kid.IsNil() {
 		return NoKeyError{"Expected a key but didn't find one"}
 	}
-	idt, err := NewIdentityTable(kid, u.sigChain(), u.sigHints)
+	idt, err := NewIdentityTable(u.G(), kid, u.sigChain(), u.sigHints)
 	if err != nil {
 		return err
 	}
@@ -402,7 +419,7 @@ func (u *User) VerifySelfSig() error {
 
 	u.G().Log.Debug("+ VerifySelfSig for user %s", u.name)
 
-	if u.IDTable().VerifySelfSig(u.name, u.id) {
+	if u.IDTable().VerifySelfSig(u.GetNormalizedName(), u.id) {
 		u.G().Log.Debug("- VerifySelfSig via SigChain")
 		return nil
 	}
@@ -424,9 +441,20 @@ func (u *User) VerifySelfSigByKey() (ret bool) {
 	return
 }
 
-func (u *User) HasActiveKey() bool {
+func (u *User) HasActiveKey() (ret bool) {
+	u.G().Log.Debug("+ HasActiveKey")
+	defer func() {
+		u.G().Log.Debug("- HasActiveKey -> %v", ret)
+	}()
+	if u.GetEldestKID().IsNil() {
+		u.G().Log.Debug("| no eldest KID; must have reset or be new")
+		ret = false
+		return
+	}
 	if ckf := u.GetComputedKeyFamily(); ckf != nil {
-		return ckf.HasActiveKey()
+		u.G().Log.Debug("| Checking user's ComputedKeyFamily")
+		ret = ckf.HasActiveKey()
+		return
 	}
 
 	if u.sigChain() == nil {
@@ -445,12 +473,19 @@ func (u *User) Equal(other *User) bool {
 	return u.id == other.id
 }
 
+func (u *User) TmpTrackChainLinkFor(username string, uid keybase1.UID) (tcl *TrackChainLink, err error) {
+	u.G().Log.Debug("+ TmpTrackChainLinkFor for %s", uid)
+	tcl, err = LocalTmpTrackChainLinkFor(u.id, uid, u.G())
+	u.G().Log.Debug("- TmpTrackChainLinkFor for %s -> %v, %v", uid, (tcl != nil), err)
+	return tcl, err
+}
+
 func (u *User) TrackChainLinkFor(username string, uid keybase1.UID) (*TrackChainLink, error) {
-	u.G().Log.Debug("+ GetTrackingStatement for %s", uid)
-	defer u.G().Log.Debug("- GetTrackingStatement for %s", uid)
+	u.G().Log.Debug("+ TrackChainLinkFor for %s", uid)
+	defer u.G().Log.Debug("- TrackChainLinkFor for %s", uid)
 
 	remote, e1 := u.remoteTrackChainLinkFor(username, uid)
-	local, e2 := LocalTrackChainLinkFor(u.id, uid)
+	local, e2 := LocalTrackChainLinkFor(u.id, uid, u.G())
 
 	u.G().Log.Debug("| Load remote -> %v", (remote != nil))
 	u.G().Log.Debug("| Load local -> %v", (local != nil))
@@ -468,10 +503,12 @@ func (u *User) TrackChainLinkFor(username string, uid keybase1.UID) (*TrackChain
 	}
 
 	if remote == nil && local != nil {
+		u.g.Log.Debug("local expire %v: %s", local.tmpExpireTime.IsZero(), local.tmpExpireTime)
 		return local, nil
 	}
 
 	if remote.GetCTime().After(local.GetCTime()) {
+		u.G().Log.Debug("| Returning newer remote")
 		return remote, nil
 	}
 
@@ -494,7 +531,7 @@ func (u *User) BaseProofSet() *ProofSet {
 		{Key: "uid", Value: u.id.String()},
 	}
 	for _, fp := range u.GetActivePGPFingerprints(true) {
-		proofs = append(proofs, Proof{Key: "fingerprint", Value: fp.String()})
+		proofs = append(proofs, Proof{Key: PGPAssertionKey, Value: fp.String()})
 	}
 
 	return NewProofSet(proofs)
@@ -539,22 +576,46 @@ func (u *User) GetDevice(id keybase1.DeviceID) (*Device, error) {
 	return device, nil
 }
 
+func (u *User) DeviceNames() ([]string, error) {
+	ckf := u.GetComputedKeyFamily()
+	if ckf == nil {
+		return nil, fmt.Errorf("no computed key family")
+	}
+	if ckf.cki == nil {
+		return nil, fmt.Errorf("no computed key infos")
+	}
+
+	var names []string
+	for _, device := range ckf.cki.Devices {
+		if device.Description == nil {
+			continue
+		}
+		names = append(names, *device.Description)
+	}
+	return names, nil
+}
+
 // Returns whether or not the current install has an active device
 // sibkey.
-func (u *User) HasDeviceInCurrentInstall() bool {
+func (u *User) HasDeviceInCurrentInstall(did keybase1.DeviceID) bool {
 	ckf := u.GetComputedKeyFamily()
 	if ckf == nil {
 		return false
 	}
-	did := u.G().Env.GetDeviceID()
-	if did.IsNil() {
-		return false
-	}
+
 	_, err := ckf.GetSibkeyForDevice(did)
 	if err != nil {
 		return false
 	}
 	return true
+}
+
+func (u *User) HasCurrentDeviceInCurrentInstall() bool {
+	did := u.G().Env.GetDeviceID()
+	if did.IsNil() {
+		return false
+	}
+	return u.HasDeviceInCurrentInstall(did)
 }
 
 func (u *User) SigningKeyPub() (GenericKey, error) {
@@ -563,7 +624,7 @@ func (u *User) SigningKeyPub() (GenericKey, error) {
 		Me:      u,
 		KeyType: DeviceSigningKeyType,
 	}
-	lockedKey, _, err := u.G().Keyrings.GetSecretKeyLocked(nil, arg)
+	lockedKey, err := u.G().Keyrings.GetSecretKeyLocked(nil, arg)
 	if err != nil {
 		return nil, err
 	}
@@ -617,10 +678,41 @@ func (u *User) IsSigIDActive(sigID keybase1.SigID) (bool, error) {
 	return true, nil
 }
 
+func (u *User) SigIDSearch(query string) (keybase1.SigID, error) {
+	if u.sigChain() == nil {
+		return "", fmt.Errorf("User's sig chain is nil.")
+	}
+
+	link := u.sigChain().GetLinkFromSigIDQuery(query)
+	if link == nil {
+		return "", fmt.Errorf("Signature matching query %q does not exist.", query)
+	}
+	if link.revoked {
+		return "", fmt.Errorf("Signature ID '%s' is already revoked.", link.GetSigID())
+	}
+	return link.GetSigID(), nil
+}
+
 func (u *User) LinkFromSigID(sigID keybase1.SigID) *ChainLink {
 	return u.sigChain().GetLinkFromSigID(sigID)
 }
 
 func (u *User) SigChainDump(w io.Writer) {
 	u.sigChain().Dump(w)
+}
+
+func (u *User) IsCachedIdentifyFresh(upk *keybase1.UserPlusKeys) bool {
+	idv, _ := u.GetIDVersion()
+	if upk.Uvv.Id == 0 || idv != upk.Uvv.Id {
+		return false
+	}
+	shv := u.GetSigHintsVersion()
+	if upk.Uvv.SigHints == 0 || shv != upk.Uvv.SigHints {
+		return false
+	}
+	scv := u.GetSigChainLastKnownSeqno()
+	if upk.Uvv.SigChain == 0 || int64(scv) != upk.Uvv.SigChain {
+		return false
+	}
+	return true
 }

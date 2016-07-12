@@ -1,3 +1,6 @@
+// Copyright 2015 Keybase, Inc. All rights reserved. Use of
+// this source code is governed by the included BSD license.
+
 package engine
 
 import (
@@ -5,10 +8,10 @@ import (
 	"io"
 
 	"github.com/keybase/client/go/libkb"
-	keybase1 "github.com/keybase/client/protocol/go"
+	keybase1 "github.com/keybase/client/go/protocol"
 
-	"golang.org/x/crypto/openpgp"
-	"golang.org/x/crypto/openpgp/clearsign"
+	"github.com/keybase/go-crypto/openpgp"
+	"github.com/keybase/go-crypto/openpgp/clearsign"
 )
 
 type PGPSignEngine struct {
@@ -80,9 +83,7 @@ func (p *PGPSignEngine) Run(ctx *Context) (err error) {
 		KeyType:  libkb.PGPKeyType,
 		KeyQuery: p.arg.Opts.KeyQuery,
 	}
-
-	key, _, err = p.G().Keyrings.GetSecretKeyWithPrompt(ctx.LoginContext, ska, ctx.SecretUI, "command-line signature")
-
+	key, err = p.G().Keyrings.GetSecretKeyWithPrompt(ctx.SecretKeyPromptArg(ska, "command-line signature"))
 	if err != nil {
 		return
 	} else if pgp, ok = key.(*libkb.PGPKeyBundle); !ok {
@@ -125,6 +126,5 @@ func (p *PGPSignEngine) Run(ctx *Context) (err error) {
 			p.G().Log.Debug("Empty source file.")
 		}
 	}
-
 	return
 }

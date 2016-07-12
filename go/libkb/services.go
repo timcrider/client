@@ -1,27 +1,37 @@
+// Copyright 2015 Keybase, Inc. All rights reserved. Use of
+// this source code is governed by the included BSD license.
+
 package libkb
 
 import (
 	"regexp"
 	"strings"
 
-	keybase1 "github.com/keybase/client/protocol/go"
+	keybase1 "github.com/keybase/client/go/protocol"
 	jsonw "github.com/keybase/go-jsonw"
 )
 
 type ServiceType interface {
 	AllStringKeys() []string
-	PrimaryStringKeys() []string
-	CheckUsername(string) error
+
+	// NormalizeUsername normalizes the given username, assuming
+	// that it's free of any leading strings like '@' or 'dns://'.
 	NormalizeUsername(string) (string, error)
+
+	// NormalizeRemote normalizes the given remote username, which
+	// is usually but not always the same as the username. It also
+	// allows leaders like '@' and 'dns://'.
+	NormalizeRemoteName(string) (string, error)
+
 	ToChecker() Checker
 	GetPrompt() string
 	LastWriterWins() bool
-	PreProofCheck(username string) (*Markup, error)
+	PreProofCheck(remotename string) (*Markup, error)
 	PreProofWarning(remotename string) *Markup
 	ToServiceJSON(remotename string) *jsonw.Wrapper
 	PostInstructions(remotename string) *Markup
-	DisplayName(username string) string
-	RecheckProofPosting(tryNumber int, status keybase1.ProofStatus) (warning *Markup, err error)
+	DisplayName(remotename string) string
+	RecheckProofPosting(tryNumber int, status keybase1.ProofStatus, remotename string) (warning *Markup, err error)
 	GetProofType() string
 	GetTypeName() string
 	CheckProofText(text string, id keybase1.SigID, sig string) error
@@ -32,7 +42,7 @@ type ServiceType interface {
 var _stDispatch = make(map[string]ServiceType)
 
 func RegisterServiceType(st ServiceType) {
-	for _, k := range st.PrimaryStringKeys() {
+	for _, k := range st.AllStringKeys() {
 		_stDispatch[k] = st
 	}
 }
@@ -84,17 +94,16 @@ func (t BaseServiceType) BaseGetProofType(st ServiceType) string {
 
 func (t BaseServiceType) BaseToChecker(st ServiceType, hint string) Checker {
 	return Checker{
-		F:             func(s string) bool { return (st.CheckUsername(s) == nil) },
+		F: func(s string) bool {
+			_, err := st.NormalizeRemoteName(s)
+			return (err == nil)
+		},
 		Hint:          hint,
 		PreserveSpace: false,
 	}
 }
 
 func (t BaseServiceType) BaseAllStringKeys(st ServiceType) []string {
-	return []string{st.GetTypeName()}
-}
-
-func (t BaseServiceType) BasePrimaryStringKeys(st ServiceType) []string {
 	return []string{st.GetTypeName()}
 }
 
@@ -128,10 +137,6 @@ func (t BaseServiceType) BaseCheckProofTextFull(text string, id keybase1.SigID, 
 		err = NotFoundError{"Couldn't find signature ID " + target + " in text"}
 	}
 	return
-}
-
-func (t BaseServiceType) NormalizeUsername(s string) (string, error) {
-	return strings.ToLower(s), nil
 }
 
 func (t BaseServiceType) BaseCheckProofForURL(text string, id keybase1.SigID) (err error) {

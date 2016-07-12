@@ -1,3 +1,6 @@
+// Copyright 2015 Keybase, Inc. All rights reserved. Use of
+// this source code is governed by the included BSD license.
+
 package engine
 
 import (
@@ -31,10 +34,8 @@ func untrackUserList(tc libkb.TestContext, fu *FakeUser, trackedUsers []string) 
 }
 
 func createGpgClient(tc libkb.TestContext) *libkb.GpgCLI {
-	gpgClient := libkb.NewGpgCLI(libkb.GpgCLIArg{
-		LogUI: tc.G.UI.GetLogUI(),
-	})
-	_, err := gpgClient.Configure()
+	gpgClient := libkb.NewGpgCLI(tc.G, tc.G.UI.GetLogUI())
+	err := gpgClient.Configure()
 	if err != nil {
 		tc.T.Fatal("Error while configuring gpg client.")
 	}

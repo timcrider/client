@@ -1,3 +1,6 @@
+// Copyright 2015 Keybase, Inc. All rights reserved. Use of
+// this source code is governed by the included BSD license.
+
 package libkb
 
 import (
@@ -34,5 +37,15 @@ func TestSecWordList144(t *testing.T) {
 	t.Logf("words: %v", words)
 	if len(words) != 14 {
 		t.Errorf("# words = %d, expected 14", len(words))
+	}
+}
+
+func TestSecWordListConstants(t *testing.T) {
+	words, err := SecWordList(PaperKeySecretEntropy + PaperKeyIDBits + PaperKeyVersionBits)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(words) != PaperKeyWordCountMin {
+		t.Errorf("paper key words for constants: %d, expected %d", len(words), PaperKeyWordCountMin)
 	}
 }

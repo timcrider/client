@@ -1,7 +1,10 @@
+// Copyright 2015 Keybase, Inc. All rights reserved. Use of
+// this source code is governed by the included BSD license.
+
 package libkb
 
 import (
-	keybase1 "github.com/keybase/client/protocol/go"
+	keybase1 "github.com/keybase/client/go/protocol"
 )
 
 type NaclKeyPair interface {
@@ -18,7 +21,6 @@ type NaclKeyGenArg struct {
 	Sibkey      bool
 	ExpireIn    int          // how long it lasts
 	EldestKeyID keybase1.KID // the eldest KID for this epoch
-	LogUI       LogUI
 	Device      *Device
 	RevSig      string // optional reverse sig.  set to nil for autogenerate.
 }
@@ -37,8 +39,8 @@ func (g *NaclKeyGen) Generate() (err error) {
 	return
 }
 
-func (g *NaclKeyGen) SaveLKS(lks *LKSec, lctx LoginContext) error {
-	_, err := WriteLksSKBToKeyring(g.pair, lks, g.arg.LogUI, lctx)
+func (g *NaclKeyGen) SaveLKS(gc *GlobalContext, lks *LKSec, lctx LoginContext) error {
+	_, err := WriteLksSKBToKeyring(gc, g.pair, lks, lctx)
 	return err
 }
 

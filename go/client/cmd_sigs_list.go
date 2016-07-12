@@ -1,13 +1,18 @@
+// Copyright 2015 Keybase, Inc. All rights reserved. Use of
+// this source code is governed by the included BSD license.
+
 package client
 
 import (
 	"fmt"
 	"strings"
 
+	"golang.org/x/net/context"
+
 	"github.com/keybase/cli"
 	"github.com/keybase/client/go/libcmdline"
 	"github.com/keybase/client/go/libkb"
-	keybase1 "github.com/keybase/client/protocol/go"
+	keybase1 "github.com/keybase/client/go/protocol"
 )
 
 type CmdSigsList struct {
@@ -163,7 +168,7 @@ func (s *CmdSigsList) Run() error {
 	}
 
 	if s.json {
-		json, err := cli.SigListJSON(keybase1.SigListJSONArg{Arg: args})
+		json, err := cli.SigListJSON(context.TODO(), keybase1.SigListJSONArg{Arg: args})
 		if err != nil {
 			return err
 		}
@@ -171,7 +176,7 @@ func (s *CmdSigsList) Run() error {
 		return nil
 	}
 
-	sigs, err := cli.SigList(keybase1.SigListArg{Arg: args})
+	sigs, err := cli.SigList(context.TODO(), keybase1.SigListArg{Arg: args})
 	if err != nil {
 		return err
 	}
@@ -180,15 +185,16 @@ func (s *CmdSigsList) Run() error {
 
 func NewCmdSigsList(cl *libcmdline.CommandLine) cli.Command {
 	return cli.Command{
-		Name:  "list",
-		Usage: "List signatures",
+		Name:         "list",
+		Usage:        "List signatures",
+		ArgumentHelp: "[username]",
 		Action: func(c *cli.Context) {
 			cl.ChooseCommand(&CmdSigsList{}, "list", c)
 		},
 		Flags: []cli.Flag{
 			cli.BoolFlag{
 				Name:  "r, revoked",
-				Usage: "Show revoked signatures.",
+				Usage: "Include revoked signatures.",
 			},
 			cli.BoolFlag{
 				Name:  "j, json",

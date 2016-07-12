@@ -1,57 +1,85 @@
+// Copyright 2015 Keybase, Inc. All rights reserved. Use of
+// this source code is governed by the included BSD license.
+
 package client
 
 import (
 	"fmt"
 
+	"golang.org/x/net/context"
+
 	"github.com/keybase/cli"
 	"github.com/keybase/client/go/libcmdline"
 	"github.com/keybase/client/go/libkb"
-	keybase1 "github.com/keybase/client/protocol/go"
-	"github.com/maxtaco/go-framed-msgpack-rpc/rpc2"
+	keybase1 "github.com/keybase/client/go/protocol"
+	rpc "github.com/keybase/go-framed-msgpack-rpc"
 )
 
 type CmdDeviceRemove struct {
-	id    keybase1.DeviceID
-	force bool
+	idOrName string
+	force    bool
+	libkb.Contextified
 }
 
 func (c *CmdDeviceRemove) ParseArgv(ctx *cli.Context) error {
 	if len(ctx.Args()) != 1 {
-		return fmt.Errorf("Device remove only takes one argument, the device ID.")
+		return fmt.Errorf("Device remove only takes one argument: the device ID or name.")
 	}
-	id, err := keybase1.DeviceIDFromString(ctx.Args()[0])
-	if err != nil {
-		return err
-	}
-	c.id = id
+	c.idOrName = ctx.Args()[0]
 	c.force = ctx.Bool("force")
 	return nil
 }
 
 func (c *CmdDeviceRemove) Run() (err error) {
+	protocols := []rpc.Protocol{
+		NewSecretUIProtocol(c.G()),
+	}
+	if err = RegisterProtocolsWithContext(protocols, c.G()); err != nil {
+		return err
+	}
+
+	var id keybase1.DeviceID
+	id, err = keybase1.DeviceIDFromString(c.idOrName)
+	if err != nil {
+		id, err = c.lookup(c.idOrName)
+		if err != nil {
+			return err
+		}
+	}
+
 	cli, err := GetRevokeClient()
 	if err != nil {
 		return err
 	}
 
-	protocols := []rpc2.Protocol{
-		NewLogUIProtocol(),
-		NewSecretUIProtocol(),
-	}
-	if err = RegisterProtocols(protocols); err != nil {
-		return err
-	}
-
-	return cli.RevokeDevice(keybase1.RevokeDeviceArg{
+	return cli.RevokeDevice(context.TODO(), keybase1.RevokeDeviceArg{
 		Force:    c.force,
-		DeviceID: c.id,
+		DeviceID: id,
 	})
 }
 
-func NewCmdDeviceRemove(cl *libcmdline.CommandLine) cli.Command {
+func (c *CmdDeviceRemove) lookup(name string) (keybase1.DeviceID, error) {
+	cli, err := GetDeviceClient()
+	if err != nil {
+		return "", err
+	}
+	devs, err := cli.DeviceList(context.TODO(), 0)
+	if err != nil {
+		return "", err
+	}
+
+	for _, dev := range devs {
+		if dev.Name == name {
+			return dev.DeviceID, nil
+		}
+	}
+	return "", fmt.Errorf("Invalid Device ID or Unknown Device Name")
+}
+
+func NewCmdDeviceRemove(cl *libcmdline.CommandLine, g *libkb.GlobalContext) cli.Command {
 	return cli.Command{
 		Name:         "remove",
-		ArgumentHelp: "<id>",
+		ArgumentHelp: "<id|name>",
 		Usage:        "Remove a device",
 		Flags: []cli.Flag{
 			cli.BoolFlag{
@@ -60,7 +88,7 @@ func NewCmdDeviceRemove(cl *libcmdline.CommandLine) cli.Command {
 			},
 		},
 		Action: func(c *cli.Context) {
-			cl.ChooseCommand(&CmdDeviceRemove{}, "remove", c)
+			cl.ChooseCommand(&CmdDeviceRemove{Contextified: libkb.NewContextified(g)}, "remove", c)
 		},
 	}
 }

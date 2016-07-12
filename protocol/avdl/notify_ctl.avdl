@@ -1,0 +1,19 @@
+
+@namespace("keybase.1")
+
+protocol notifyCtl {
+  import idl "common.avdl";
+
+  record NotificationChannels {
+    boolean session;
+    boolean users;
+    boolean kbfs;
+    boolean tracking;
+    boolean favorites;
+    boolean paperkeys;
+    boolean keyfamily;
+    boolean service;
+  }
+
+  void setNotifications(NotificationChannels channels);
+}

@@ -1,3 +1,6 @@
+// Copyright 2015 Keybase, Inc. All rights reserved. Use of
+// this source code is governed by the included BSD license.
+
 package engine
 
 import (
@@ -7,17 +10,17 @@ import (
 	"testing"
 )
 
-func fakeUser(t *testing.T, prefix string) (username, email string) {
+func fakeUser(tb testing.TB, prefix string) (username, email string) {
 	buf := make([]byte, 5)
 	if _, err := rand.Read(buf); err != nil {
-		t.Fatal(err)
+		tb.Fatal(err)
 	}
 	username = fmt.Sprintf("%s_%s", prefix, hex.EncodeToString(buf))
 	email = fmt.Sprintf("test+%s@keybase.io", username)
 	return username, email
 }
 
-func fakePassphrase(t *testing.T) string {
+func fakePassphrase(t testing.TB) string {
 	buf := make([]byte, 12)
 	if _, err := rand.Read(buf); err != nil {
 		t.Fatal(err)

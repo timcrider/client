@@ -1,16 +1,25 @@
-FROM ubuntu:14.04
+FROM alpine:3.3
 MAINTAINER Keybase <admin@keybase.io>
 
-VOLUME /keybase/bin
-VOLUME /keybase/socket
+# Remove openssl once KBFSDocker changes are in
+RUN apk add --update wget ca-certificates fuse jq bash openssl && \
+    cd /tmp && \
+    wget "https://github.com/andyshinn/alpine-pkg-glibc/releases/download/2.23-r1/glibc-2.23-r1.apk" \
+        "https://github.com/andyshinn/alpine-pkg-glibc/releases/download/2.23-r1/glibc-bin-2.23-r1.apk" && \
+    apk add --allow-untrusted glibc-2.23-r1.apk glibc-bin-2.23-r1.apk && \
+    echo 'hosts: files mdns4_minimal [NOTFOUND=return] dns mdns4' >> /etc/nsswitch.conf && \
+    adduser -D keybase && \
+    mkdir /keybase && \
+    chmod 777 /keybase && \
+    rm -rf /tmp/* /var/cache/apk/*
 
-ADD test/start_daemon_in_container.sh /start_daemon.sh
-
-RUN useradd -m keybase
 USER keybase
-ENV KEYBASE_RUN_MODE devel
-ENV KEYBASE_SOCKET_FILE /keybase/socket/keybase.sock
-ENV KEYBASE_DEBUG true
-ENV PATH=$PATH:/keybase/bin
+WORKDIR /home/keybase
 
-CMD /start_daemon.sh
+ENV KEYBASE_DEBUG=0 \
+    KEYBASE_RUN_MODE=devel \
+    KEYBASE_SERVER_URI="http://kbweb.local:3000" \
+    PATH=/home/keybase:$PATH
+
+ADD keybase/keybase /home/keybase/keybase
+ADD revision /home/keybase/client_revision

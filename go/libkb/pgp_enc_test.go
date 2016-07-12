@@ -1,20 +1,23 @@
+// Copyright 2015 Keybase, Inc. All rights reserved. Use of
+// this source code is governed by the included BSD license.
+
 package libkb
 
 import (
 	"bytes"
+	"crypto/rand"
 	"io/ioutil"
-	"os"
 	"strings"
 	"testing"
 	"testing/quick"
 
-	"golang.org/x/crypto/openpgp"
+	"github.com/keybase/go-crypto/openpgp"
 )
 
 // give a private key and a public key, test the encryption of a
 // message
 func TestPGPEncrypt(t *testing.T) {
-	tc := SetupTest(t, "pgp_encrypt")
+	tc := SetupTest(t, "pgp_encrypt", 1)
 	defer tc.Cleanup()
 	bundleSrc, err := tc.MakePGPKey("src@keybase.io")
 	if err != nil {
@@ -55,7 +58,7 @@ func TestPGPEncrypt(t *testing.T) {
 }
 
 func TestPGPEncryptString(t *testing.T) {
-	tc := SetupTest(t, "pgp_encrypt")
+	tc := SetupTest(t, "pgp_encrypt", 1)
 	defer tc.Cleanup()
 	bundleSrc, err := tc.MakePGPKey("src@keybase.io")
 	if err != nil {
@@ -96,7 +99,7 @@ func TestPGPEncryptString(t *testing.T) {
 }
 
 func TestPGPEncryptQuick(t *testing.T) {
-	tc := SetupTest(t, "pgp_encrypt")
+	tc := SetupTest(t, "pgp_encrypt", 1)
 	defer tc.Cleanup()
 	bundleSrc, err := tc.MakePGPKey("src@keybase.io")
 	if err != nil {
@@ -130,7 +133,7 @@ func TestPGPEncryptQuick(t *testing.T) {
 			if err != nil {
 				return false
 			}
-			if bytes.Compare(data, msg) != 0 {
+			if !bytes.Equal(data, msg) {
 				return false
 			}
 		}
@@ -143,7 +146,7 @@ func TestPGPEncryptQuick(t *testing.T) {
 }
 
 func TestPGPEncryptLong(t *testing.T) {
-	tc := SetupTest(t, "pgp_encrypt")
+	tc := SetupTest(t, "pgp_encrypt", 1)
 	defer tc.Cleanup()
 	bundleSrc, err := tc.MakePGPKey("src@keybase.io")
 	if err != nil {
@@ -155,12 +158,8 @@ func TestPGPEncryptLong(t *testing.T) {
 	}
 
 	msg := make([]byte, 1024*1024)
-	f, err := os.Open("/dev/urandom")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer f.Close()
-	f.Read(msg)
+
+	rand.Read(msg)
 
 	G.Log.Info("msg size: %d", len(msg))
 

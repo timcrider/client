@@ -1,0 +1,22 @@
+/* @flow */
+
+export type FriendshipUserInfo = {
+  username: string,
+  fullname: string,
+  followsYou: boolean,
+  following: boolean
+}
+
+export type Tab = 'Followers' | 'Following'
+
+export type Props = {
+  style?: ?Object,
+  currentTab: Tab,
+  onSwitchTab?: (selected: Tab) => void,
+  onUserClick?: (username: string) => void,
+  followers: Array<FriendshipUserInfo>,
+  following: Array<FriendshipUserInfo>
+}
+
+export default class Render extends React$Component<void, Props, void> {
+}

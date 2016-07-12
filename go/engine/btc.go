@@ -1,10 +1,13 @@
+// Copyright 2015 Keybase, Inc. All rights reserved. Use of
+// this source code is governed by the included BSD license.
+
 package engine
 
 import (
 	"fmt"
 
 	"github.com/keybase/client/go/libkb"
-	keybase1 "github.com/keybase/client/protocol/go"
+	keybase1 "github.com/keybase/client/go/protocol"
 )
 
 type BTCEngine struct {
@@ -27,7 +30,7 @@ func (e *BTCEngine) Name() string {
 
 func (e *BTCEngine) Prereqs() Prereqs {
 	return Prereqs{
-		Session: true,
+		Device: true,
 	}
 }
 
@@ -42,8 +45,12 @@ func (e *BTCEngine) SubConsumers() []libkb.UIConsumer {
 	return []libkb.UIConsumer{}
 }
 
-func (e *BTCEngine) Run(ctx *Context) error {
-	_, _, err := libkb.BtcAddrCheck(e.address, nil)
+func (e *BTCEngine) Run(ctx *Context) (err error) {
+	e.G().Log.Debug("+ BTCEngine Run")
+	defer func() {
+		e.G().Log.Debug("- BTCEngine Run")
+	}()
+	_, _, err = libkb.BtcAddrCheck(e.address, nil)
 	if err != nil {
 		return err
 	}
@@ -62,10 +69,11 @@ func (e *BTCEngine) Run(ctx *Context) error {
 		sigIDToRevoke = cryptocurrencyLink.GetSigID()
 	}
 
-	sigKey, _, err := e.G().Keyrings.GetSecretKeyWithPrompt(ctx.LoginContext, libkb.SecretKeyArg{
+	ska := libkb.SecretKeyArg{
 		Me:      me,
 		KeyType: libkb.DeviceSigningKeyType,
-	}, ctx.SecretUI, "to register a cryptocurrency address")
+	}
+	sigKey, err := e.G().Keyrings.GetSecretKeyWithPrompt(ctx.SecretKeyPromptArg(ska, "to register a cryptocurrency address"))
 	if err != nil {
 		return err
 	}
@@ -95,6 +103,5 @@ func (e *BTCEngine) Run(ctx *Context) error {
 	if err != nil {
 		return err
 	}
-	ctx.LogUI.Info("Added bitcoin address %s", e.address)
 	return nil
 }

@@ -1,82 +1,144 @@
+// Copyright 2015 Keybase, Inc. All rights reserved. Use of
+// this source code is governed by the included BSD license.
+
 package libkb
 
 import (
 	"fmt"
-	"sync"
+	"time"
 
-	keybase1 "github.com/keybase/client/protocol/go"
+	keybase1 "github.com/keybase/client/go/protocol"
 	jsonw "github.com/keybase/go-jsonw"
+	"stathat.com/c/ramcache"
 )
 
-//==================================================================
-
 type ResolveResult struct {
-	uid        keybase1.UID
-	body       *jsonw.Wrapper
-	err        error
-	kbUsername string
+	uid                keybase1.UID
+	body               *jsonw.Wrapper
+	err                error
+	queriedKbUsername  string
+	queriedByUID       bool
+	resolvedKbUsername string
+	cachedAt           time.Time
+	mutable            bool
 }
+
+const (
+	resolveCacheTTL           = 12 * time.Hour
+	resolveCacheMaxAge        = 12 * time.Hour
+	resolveCacheMaxAgeMutable = 20 * time.Minute
+	resolveCacheMaxAgeErrored = 5 * time.Second
+)
 
 func (res *ResolveResult) GetUID() keybase1.UID {
 	return res.uid
+}
+
+func (res *ResolveResult) GetUsername() string {
+	return res.resolvedKbUsername
+}
+func (res *ResolveResult) GetNormalizedUsername() NormalizedUsername {
+	return NewNormalizedUsername(res.GetUsername())
+}
+func (res *ResolveResult) GetNormalizedQueriedUsername() NormalizedUsername {
+	return NewNormalizedUsername(res.queriedKbUsername)
+}
+
+func (res *ResolveResult) WasKBAssertion() bool {
+	return res.queriedKbUsername != "" || res.queriedByUID
 }
 
 func (res *ResolveResult) GetError() error {
 	return res.err
 }
 
-func ResolveUID(input string) (res ResolveResult) {
-	G.Log.Debug("+ Resolving username %s", input)
+func (res *ResolveResult) GetBody() *jsonw.Wrapper {
+	return res.body
+}
+
+func (r *Resolver) ResolveWithBody(input string) ResolveResult {
+	return r.resolve(input, true)
+}
+
+func (r *Resolver) Resolve(input string) ResolveResult {
+	return r.resolve(input, false)
+}
+
+func (r *Resolver) resolve(input string, withBody bool) (res ResolveResult) {
+	defer r.G().Trace(fmt.Sprintf("Resolving username %q", input), func() error { return res.err })()
+
 	var au AssertionURL
 	if au, res.err = ParseAssertionURL(input, false); res.err != nil {
-		return
+		return res
 	}
-	res = resolveUID(au)
-	return
+	res = r.resolveURL(au, input, withBody, false)
+	return res
 }
 
-func ResolveUIDValuePair(key, value string) (res ResolveResult) {
-	G.Log.Debug("+ Resolve username (%s,%s)", key, value)
-
-	var au AssertionURL
-	if au, res.err = ParseAssertionURLKeyValue(key, value, false); res.err != nil {
-		res = resolveUID(au)
-	}
-
-	G.Log.Debug("- Resolve username (%s,%s) -> %v", key, value, res.uid)
-	return
+func (r *Resolver) ResolveFullExpression(input string) (res ResolveResult) {
+	return r.resolveFullExpression(input, false, false)
 }
 
-func resolveUID(au AssertionURL) ResolveResult {
-	// A standard keybase UID, so it's already resolved
-	if tmp := au.ToUID(); tmp.Exists() {
-		return ResolveResult{uid: tmp}
+func (r *Resolver) ResolveFullExpressionNeedUsername(input string) (res ResolveResult) {
+	return r.resolveFullExpression(input, false, true)
+}
+
+func (r *Resolver) ResolveFullExpressionWithBody(input string) (res ResolveResult) {
+	return r.resolveFullExpression(input, true, false)
+}
+
+func (r *Resolver) resolveFullExpression(input string, withBody bool, needUsername bool) (res ResolveResult) {
+	defer r.G().Trace(fmt.Sprintf("Resolving full expression %q", input), func() error { return res.err })()
+
+	var expr AssertionExpression
+	expr, res.err = AssertionParseAndOnly(input)
+	if res.err != nil {
+		return res
+	}
+	u := FindBestIdentifyComponentURL(expr)
+	if u == nil {
+		res.err = ResolutionError{Input: input, Msg: "Cannot find a resolvable factor"}
+		return res
+	}
+	return r.resolveURL(u, input, withBody, needUsername)
+}
+
+func (r *Resolver) resolveURL(au AssertionURL, input string, withBody bool, needUsername bool) ResolveResult {
+
+	// A standard keybase UID, so it's already resolved... unless we explicitly
+	// need it!
+	if !needUsername {
+		if tmp := au.ToUID(); tmp.Exists() {
+			return ResolveResult{uid: tmp}
+		}
 	}
 
 	ck := au.CacheKey()
 
-	if G.ResolveCache == nil {
-		return ResolveResult{}
-	}
-
-	if p := G.ResolveCache.Get(ck); p != nil {
+	if p := r.getCache(ck); p != nil && (!needUsername || len(p.resolvedKbUsername) > 0) {
 		return *p
 	}
 
-	r := resolveUsername(au)
-	G.ResolveCache.Put(ck, r)
+	res := r.resolveURLViaServerLookup(au, input, withBody)
 
-	return r
+	// Cache for a shorter period of time if it's not a Keybase identity
+	res.mutable = !au.IsKeybase()
+
+	r.putCache(ck, res)
+	return res
 }
 
-func resolveUsername(au AssertionURL) (res ResolveResult) {
+func (r *Resolver) resolveURLViaServerLookup(au AssertionURL, input string, withBody bool) (res ResolveResult) {
+	defer r.G().Trace(fmt.Sprintf("resolveURLViaServerLookup(input = %q)", input), func() error { return res.err })()
 
 	var key, val string
 	var ares *APIRes
 	var l int
 
 	if au.IsKeybase() {
-		res.kbUsername = au.GetValue()
+		res.queriedKbUsername = au.GetValue()
+	} else if au.IsUID() {
+		res.queriedByUID = true
 	}
 
 	if key, val, res.err = au.ToLookup(); res.err != nil {
@@ -85,13 +147,26 @@ func resolveUsername(au AssertionURL) (res ResolveResult) {
 
 	ha := HTTPArgsFromKeyValuePair(key, S{val})
 	ha.Add("multi", I{1})
-	ares, res.err = G.API.Get(APIArg{
-		Endpoint:    "user/lookup",
-		NeedSession: false,
-		Args:        ha,
+	fields := "basics"
+	if withBody {
+		fields += ",public_keys,pictures"
+	}
+	ha.Add("fields", S{fields})
+	ares, res.err = r.G().API.Get(APIArg{
+		Endpoint:       "user/lookup",
+		NeedSession:    false,
+		Args:           ha,
+		AppStatusCodes: []int{SCOk, SCNotFound},
+		Contextified:   NewContextified(r.G()),
 	})
 
 	if res.err != nil {
+		r.G().Log.Debug("API user/lookup %q error: %s", input, res.err)
+		return
+	}
+	if ares.AppStatus.Code == SCNotFound {
+		r.G().Log.Debug("API user/lookup %q not found", input)
+		res.err = NotFoundError{}
 		return
 	}
 
@@ -105,39 +180,99 @@ func resolveUsername(au AssertionURL) (res ResolveResult) {
 	}
 
 	if l == 0 {
-		res.err = fmt.Errorf("No resolution found for %s", au)
+		res.err = ResolutionError{Input: input, Msg: "No resolution found"}
 	} else if l > 1 {
-		res.err = fmt.Errorf("Identity '%s' is ambiguous", au)
+		res.err = ResolutionError{Input: input, Msg: "Identify is ambiguous"}
 	} else {
 		res.body = them.AtIndex(0)
 		res.uid, res.err = GetUID(res.body.AtKey("id"))
+		if res.err == nil {
+			res.resolvedKbUsername, res.err = res.body.AtPath("basics.username").GetString()
+		}
 	}
 
 	return
 }
 
-type ResolveCache struct {
-	results map[string]ResolveResult
-	sync.RWMutex
+type resolveCacheStats struct {
+	misses          int
+	timeouts        int
+	mutableTimeouts int
+	errorTimeouts   int
+	hits            int
 }
 
-func NewResolveCache() *ResolveCache {
-	return &ResolveCache{results: make(map[string]ResolveResult)}
+type Resolver struct {
+	Contextified
+	cache   *ramcache.Ramcache
+	stats   resolveCacheStats
+	nowFunc func() time.Time
 }
 
-func (c *ResolveCache) Get(key string) *ResolveResult {
-	c.RLock()
-	res, found := c.results[key]
-	c.RUnlock()
-	if found {
-		return &res
+func (s resolveCacheStats) eq(m, t, mt, et, h int) bool {
+	return (s.misses == m) && (s.timeouts == t) && (s.mutableTimeouts == mt) && (s.errorTimeouts == et) && (s.hits == h)
+}
+
+func NewResolver(g *GlobalContext) *Resolver {
+	return &Resolver{
+		Contextified: NewContextified(g),
+		cache:        nil,
+		nowFunc:      func() time.Time { return time.Now() },
 	}
-	return nil
 }
 
-func (c *ResolveCache) Put(key string, res ResolveResult) {
-	res.body = nil
-	c.Lock()
-	c.results[key] = res
-	c.Unlock()
+func (r *Resolver) EnableCaching() {
+	cache := ramcache.New()
+	cache.MaxAge = resolveCacheMaxAge
+	cache.TTL = resolveCacheTTL
+	r.cache = cache
+}
+
+func (r *Resolver) Shutdown() {
+	if r.cache == nil {
+		return
+	}
+	r.cache.Shutdown()
+}
+
+func (r *Resolver) getCache(key string) *ResolveResult {
+	if r.cache == nil {
+		return nil
+	}
+	res, _ := r.cache.Get(key)
+	if res == nil {
+		r.stats.misses++
+		return nil
+	}
+	rres, ok := res.(*ResolveResult)
+	if !ok {
+		r.stats.misses++
+		return nil
+	}
+	now := r.nowFunc()
+	if now.Sub(rres.cachedAt) > resolveCacheMaxAge {
+		r.stats.timeouts++
+		return nil
+	}
+	if rres.mutable && now.Sub(rres.cachedAt) > resolveCacheMaxAgeMutable {
+		r.stats.mutableTimeouts++
+		return nil
+	}
+	if rres.err != nil && now.Sub(rres.cachedAt) > resolveCacheMaxAgeErrored {
+		r.stats.errorTimeouts++
+		return nil
+	}
+	r.stats.hits++
+	return rres
+}
+
+// Put receives a copy of a ResolveResult, clears out the body
+// to avoid caching data that can go stale, and stores the result.
+func (r *Resolver) putCache(key string, res ResolveResult) {
+	if r.cache == nil {
+		return
+	}
+	res.cachedAt = r.nowFunc()
+	res.body = nil // Don't cache body
+	r.cache.Set(key, &res)
 }

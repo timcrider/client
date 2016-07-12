@@ -1,3 +1,6 @@
+// Copyright 2015 Keybase, Inc. All rights reserved. Use of
+// this source code is governed by the included BSD license.
+
 package libkb
 
 import (
@@ -7,7 +10,7 @@ import (
 	"strconv"
 	"strings"
 
-	keybase1 "github.com/keybase/client/protocol/go"
+	keybase1 "github.com/keybase/client/go/protocol"
 	jsonw "github.com/keybase/go-jsonw"
 )
 
@@ -50,7 +53,10 @@ func NewJSONLocalDb(e LocalDb) *JSONLocalDb { return &JSONLocalDb{e} }
 func (j *JSONLocalDb) Open() error          { return j.engine.Open() }
 func (j *JSONLocalDb) ForceOpen() error     { return j.engine.ForceOpen() }
 func (j *JSONLocalDb) Close() error         { return j.engine.Close() }
-func (j *JSONLocalDb) Nuke() error          { return j.engine.Nuke() }
+func (j *JSONLocalDb) Nuke() (string, error) {
+	fn, err := j.engine.Nuke()
+	return fn, err
+}
 
 func (j *JSONLocalDb) Put(id DbKey, aliases []DbKey, val *jsonw.Wrapper) error {
 	bytes, err := val.Marshal()
@@ -58,6 +64,14 @@ func (j *JSONLocalDb) Put(id DbKey, aliases []DbKey, val *jsonw.Wrapper) error {
 		err = j.engine.Put(id, aliases, bytes)
 	}
 	return err
+}
+
+func (j *JSONLocalDb) PutRaw(id DbKey, b []byte) error {
+	return j.engine.Put(id, nil, b)
+}
+
+func (j *JSONLocalDb) GetRaw(id DbKey) ([]byte, bool, error) {
+	return j.engine.Get(id)
 }
 
 func (j *JSONLocalDb) Get(id DbKey) (*jsonw.Wrapper, error) {
@@ -112,6 +126,7 @@ const (
 	DBSigChainTailEncrypted   = 0xe9
 	DBMerkleRoot              = 0xf0
 	DBTrackers                = 0xf1
+	DBGregor                  = 0xf2
 )
 
 const (

@@ -1,3 +1,6 @@
+// Copyright 2015 Keybase, Inc. All rights reserved. Use of
+// this source code is governed by the included BSD license.
+
 package engine
 
 import (
@@ -5,8 +8,8 @@ import (
 	"io"
 
 	"github.com/keybase/client/go/libkb"
-	keybase1 "github.com/keybase/client/protocol/go"
-	"golang.org/x/crypto/openpgp/armor"
+	keybase1 "github.com/keybase/client/go/protocol"
+	"github.com/keybase/go-crypto/openpgp/armor"
 )
 
 type PGPEncryptArg struct {
@@ -17,13 +20,13 @@ type PGPEncryptArg struct {
 	NoSelf       bool
 	BinaryOutput bool
 	KeyQuery     string
-	TrackOptions keybase1.TrackOptions
 }
 
 // PGPEncrypt encrypts data read from a source into a sink
 // for a set of users.  It will track them if necessary.
 type PGPEncrypt struct {
 	arg *PGPEncryptArg
+	me  *libkb.User
 	libkb.Contextified
 }
 
@@ -47,20 +50,22 @@ func (e *PGPEncrypt) Prereqs() Prereqs {
 
 // RequiredUIs returns the required UIs.
 func (e *PGPEncrypt) RequiredUIs() []libkb.UIKind {
-	return nil
+	// context.SecretKeyPromptArg requires SecretUI
+	return []libkb.UIKind{libkb.SecretUIKind}
 }
 
 // SubConsumers returns the other UI consumers for this engine.
 func (e *PGPEncrypt) SubConsumers() []libkb.UIConsumer {
 	return []libkb.UIConsumer{
 		&PGPKeyfinder{},
+		&ResolveThenIdentify2{},
 	}
 }
 
 // Run starts the engine.
 func (e *PGPEncrypt) Run(ctx *Context) error {
 	// verify valid options based on logged in state:
-	ok, err := IsLoggedIn(e, ctx)
+	ok, uid, err := IsLoggedIn(e, ctx)
 	if err != nil {
 		return err
 	}
@@ -75,22 +80,23 @@ func (e *PGPEncrypt) Run(ctx *Context) error {
 		if !e.arg.NoSelf {
 			return libkb.LoginRequiredError{Context: "you must be logged in to encrypt for yourself"}
 		}
+	} else {
+		me, err := libkb.LoadMeByUID(e.G(), uid)
+		if err != nil {
+			return err
+		}
+		e.me = me
 	}
 
 	var mykey *libkb.PGPKeyBundle
 	var signer *libkb.PGPKeyBundle
 	if !e.arg.NoSign {
-		me, err := libkb.LoadMe(libkb.NewLoadUserArg(e.G()))
-		if err != nil {
-			return err
-		}
-
 		ska := libkb.SecretKeyArg{
-			Me:       me,
+			Me:       e.me,
 			KeyType:  libkb.PGPKeyType,
 			KeyQuery: e.arg.KeyQuery,
 		}
-		key, _, err := e.G().Keyrings.GetSecretKeyWithPrompt(ctx.LoginContext, ska, ctx.SecretUI, "command-line signature")
+		key, err := e.G().Keyrings.GetSecretKeyWithPrompt(ctx.SecretKeyPromptArg(ska, "command-line signature"))
 		if err != nil {
 			return err
 		}
@@ -103,15 +109,13 @@ func (e *PGPEncrypt) Run(ctx *Context) error {
 		signer = mykey
 	}
 
-	var skipTrack = true
-	if e.arg.TrackOptions.BypassConfirm {
-		skipTrack = false
+	usernames, err := e.verifyUsers(ctx, e.arg.Recips, ok)
+	if err != nil {
+		return err
 	}
 
 	kfarg := &PGPKeyfinderArg{
-		Users:        e.arg.Recips,
-		SkipTrack:    skipTrack,
-		TrackOptions: e.arg.TrackOptions,
+		Usernames: usernames,
 	}
 
 	kf := NewPGPKeyfinder(kfarg, e.G())
@@ -131,7 +135,7 @@ func (e *PGPEncrypt) Run(ctx *Context) error {
 		writer = aw
 	}
 
-	var recipients []*libkb.PGPKeyBundle
+	ks := newKeyset()
 	if !e.arg.NoSelf {
 		if mykey == nil {
 			// need to load the public key for the logged in user
@@ -143,14 +147,17 @@ func (e *PGPEncrypt) Run(ctx *Context) error {
 
 		// mykey could still be nil
 		if mykey != nil {
-			recipients = append(recipients, mykey)
+			ks.Add(mykey)
 		}
 	}
 
 	for _, up := range uplus {
-		recipients = append(recipients, up.Keys...)
+		for _, k := range up.Keys {
+			ks.Add(k)
+		}
 	}
 
+	recipients := ks.Sorted()
 	if err := libkb.PGPEncrypt(e.arg.Source, writer, signer, recipients); err != nil {
 		return err
 	}
@@ -171,4 +178,55 @@ func (e *PGPEncrypt) loadSelfKey() (*libkb.PGPKeyBundle, error) {
 		return nil, libkb.NoKeyError{Msg: "No PGP key found for encrypting for self"}
 	}
 	return keys[0], nil
+}
+
+func (e *PGPEncrypt) verifyUsers(ctx *Context, assertions []string, loggedIn bool) ([]string, error) {
+	var names []string
+	for _, userAssert := range assertions {
+		arg := keybase1.Identify2Arg{
+			UserAssertion: userAssert,
+			Reason: keybase1.IdentifyReason{
+				Type: keybase1.IdentifyReasonType_ENCRYPT,
+			},
+			AlwaysBlock: true,
+		}
+		eng := NewResolveThenIdentify2(e.G(), &arg)
+		if err := RunEngine(eng, ctx); err != nil {
+			return nil, libkb.IdentifyFailedError{Assertion: userAssert, Reason: err.Error()}
+		}
+		res := eng.Result()
+		names = append(names, res.Upk.Username)
+	}
+	return names, nil
+}
+
+// keyset maintains a set of pgp keys, preserving insertion order.
+type keyset struct {
+	index []keybase1.KID
+	keys  map[keybase1.KID]*libkb.PGPKeyBundle
+}
+
+// newKeyset creates an empty keyset.
+func newKeyset() *keyset {
+	return &keyset{keys: make(map[keybase1.KID]*libkb.PGPKeyBundle)}
+}
+
+// Add adds bundle to the keyset.  If a key already exists, it
+// will be ignored.
+func (k *keyset) Add(bundle *libkb.PGPKeyBundle) {
+	kid := bundle.GetKID()
+	if _, ok := k.keys[kid]; ok {
+		return
+	}
+	k.keys[kid] = bundle
+	k.index = append(k.index, kid)
+}
+
+// Sorted returns the unique keys in insertion order.
+func (k *keyset) Sorted() []*libkb.PGPKeyBundle {
+	var sorted []*libkb.PGPKeyBundle
+	for _, kid := range k.index {
+		sorted = append(sorted, k.keys[kid])
+	}
+	return sorted
 }

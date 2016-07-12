@@ -1,3 +1,6 @@
+// Copyright 2015 Keybase, Inc. All rights reserved. Use of
+// this source code is governed by the included BSD license.
+
 package libkb
 
 import (
@@ -89,7 +92,7 @@ func TestVerifyStringReject(t *testing.T) {
 
 	_, err = keyPair.VerifyString(sig2+sig, msg)
 	if err == nil {
-		t.Error("Signature with preprended invalid signature unexpectedly passes")
+		t.Error("Signature with prepended invalid signature unexpectedly passes")
 	}
 }
 

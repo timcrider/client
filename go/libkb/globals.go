@@ -1,3 +1,6 @@
+// Copyright 2015 Keybase, Inc. All rights reserved. Use of
+// this source code is governed by the included BSD license.
+
 //
 // globals
 //
@@ -20,44 +23,79 @@ import (
 	"runtime"
 	"sync"
 
-	"github.com/keybase/client/go/cache/favcache"
+	"github.com/jonboulle/clockwork"
 	"github.com/keybase/client/go/logger"
-	keybase1 "github.com/keybase/client/protocol/go"
+	keybase1 "github.com/keybase/client/go/protocol"
 )
 
 type ShutdownHook func() error
 
+type LoginHook interface {
+	OnLogin() error
+}
+
+type LogoutHook interface {
+	OnLogout() error
+}
+
 type GlobalContext struct {
-	Log              logger.Logger   // Handles all logging
-	Env              *Env            // Env variables, cmdline args & config
-	Keyrings         *Keyrings       // Gpg Keychains holding keys
-	API              API             // How to make a REST call to the server
-	ResolveCache     *ResolveCache   // cache of resolve results
-	LocalDb          *JSONLocalDb    // Local DB for cache
-	MerkleClient     *MerkleClient   // client for querying server's merkle sig tree
-	XAPI             ExternalAPI     // for contacting Twitter, Github, etc.
-	Output           io.Writer       // where 'Stdout'-style output goes
-	ProofCache       *ProofCache     // where to cache proof results
-	FavoriteCache    *favcache.Cache // where to cache favorite folders
-	GpgClient        *GpgCLI         // A standard GPG-client (optional)
-	ShutdownHooks    []ShutdownHook  // on shutdown, fire these...
-	SocketInfo       SocketInfo      // which socket to bind/connect to
-	socketWrapperMu  sync.RWMutex
-	SocketWrapper    *SocketWrapper    // only need one connection per
-	LoopbackListener *LoopbackListener // If we're in loopback mode, we'll connect through here
-	XStreams         *ExportedStreams  // a table of streams we've exported to the daemon (or vice-versa)
-	Timers           *TimerSet         // Which timers are currently configured on
-	IdentifyCache    *IdentifyCache    // cache of IdentifyOutcomes
-	UI               UI                // Interact with the UI
-	Service          bool              // whether we're in server mode
-	shutdown         bool              // whether we've shut down or not
-	loginStateMu     sync.RWMutex      // protects loginState pointer, which gets destroyed on logout
-	loginState       *LoginState       // What phase of login the user's in
+	Log               logger.Logger  // Handles all logging
+	VDL               *VDebugLog     // verbose debug log
+	Env               *Env           // Env variables, cmdline args & config
+	Keyrings          *Keyrings      // Gpg Keychains holding keys
+	API               API            // How to make a REST call to the server
+	Resolver          *Resolver      // cache of resolve results
+	LocalDb           *JSONLocalDb   // Local DB for cache
+	MerkleClient      *MerkleClient  // client for querying server's merkle sig tree
+	XAPI              ExternalAPI    // for contacting Twitter, Github, etc.
+	Output            io.Writer      // where 'Stdout'-style output goes
+	ProofCache        *ProofCache    // where to cache proof results
+	GpgClient         *GpgCLI        // A standard GPG-client (optional)
+	ShutdownHooks     []ShutdownHook // on shutdown, fire these...
+	SocketInfo        Socket         // which socket to bind/connect to
+	socketWrapperMu   sync.RWMutex
+	SocketWrapper     *SocketWrapper     // only need one connection per
+	LoopbackListener  *LoopbackListener  // If we're in loopback mode, we'll connect through here
+	XStreams          *ExportedStreams   // a table of streams we've exported to the daemon (or vice-versa)
+	Timers            *TimerSet          // Which timers are currently configured on
+	TrackCache        *TrackCache        // cache of IdentifyOutcomes for tracking purposes
+	Identify2Cache    Identify2Cacher    // cache of Identify2 results for fast-pathing identify2 RPCS
+	LinkCache         *LinkCache         // cache of ChainLinks
+	UI                UI                 // Interact with the UI
+	Service           bool               // whether we're in server mode
+	shutdownOnce      sync.Once          // whether we've shut down or not
+	loginStateMu      sync.RWMutex       // protects loginState pointer, which gets destroyed on logout
+	loginState        *LoginState        // What phase of login the user's in
+	ConnectionManager *ConnectionManager // keep tabs on all active client connections
+	NotifyRouter      *NotifyRouter      // How to route notifications
+	// How to route UIs. Nil if we're in standalone mode or in
+	// tests, and non-nil in service mode.
+	UIRouter            UIRouter               // How to route UIs
+	ProofCheckerFactory ProofCheckerFactory    // Makes new ProofCheckers
+	ExitCode            keybase1.ExitCode      // Value to return to OS on Exit()
+	RateLimits          *RateLimits            // tracks the last time certain actions were taken
+	clockMu             sync.Mutex             // protects Clock
+	clock               clockwork.Clock        // RealClock unless we're testing
+	SecretStoreAll      SecretStoreAll         // nil except for tests and supported platforms
+	hookMu              sync.RWMutex           // protects loginHooks, logoutHooks
+	loginHooks          []LoginHook            // call these on login
+	logoutHooks         []LogoutHook           // call these on logout
+	GregorDismisser     GregorDismisser        // for dismissing gregor items that we've handled
+	GregorListener      GregorListener         // for alerting about clients connecting and registering UI protocols
+	OutOfDateInfo       keybase1.OutOfDateInfo // Stores out of date messages we got from API server headers.
+
+	// Can be overloaded by tests to get an improvement in performance
+	NewTriplesec func(pw []byte, salt []byte) (Triplesec, error)
 }
 
 func NewGlobalContext() *GlobalContext {
+	log := logger.New("keybase")
 	return &GlobalContext{
-		Log: logger.New("keybase"),
+		Log:                 log,
+		VDL:                 NewVDebugLog(log),
+		ProofCheckerFactory: defaultProofCheckerFactory,
+		clock:               clockwork.NewRealClock(),
+		NewTriplesec:        NewSecureTriplesec,
 	}
 }
 
@@ -71,10 +109,28 @@ func (g *GlobalContext) SetCommandLine(cmd CommandLine) { g.Env.SetCommandLine(c
 
 func (g *GlobalContext) SetUI(u UI) { g.UI = u }
 
-func (g *GlobalContext) Init() {
+func (g *GlobalContext) Init() *GlobalContext {
 	g.Env = NewEnv(nil, nil)
 	g.Service = false
 	g.createLoginState()
+	g.Resolver = NewResolver(g)
+	g.RateLimits = NewRateLimits(g)
+	g.SecretStoreAll = NewSecretStoreAll(g)
+	return g
+}
+
+func NewGlobalContextInit() *GlobalContext {
+	return NewGlobalContext().Init()
+}
+
+func (g *GlobalContext) SetService() {
+	g.Service = true
+	g.ConnectionManager = NewConnectionManager()
+	g.NotifyRouter = NewNotifyRouter(g)
+}
+
+func (g *GlobalContext) SetUIRouter(u UIRouter) {
+	g.UIRouter = u
 }
 
 // requires lock on loginStateMu before calling
@@ -99,6 +155,11 @@ func (g *GlobalContext) LoginState() *LoginState {
 	return g.loginState
 }
 
+// ResetLoginState is mainly used for testing...
+func (g *GlobalContext) ResetLoginState() {
+	g.createLoginStateLocked()
+}
+
 func (g *GlobalContext) Logout() error {
 	g.loginStateMu.Lock()
 	defer g.loginStateMu.Unlock()
@@ -106,11 +167,16 @@ func (g *GlobalContext) Logout() error {
 		return err
 	}
 
-	if g.IdentifyCache != nil {
-		g.IdentifyCache.Shutdown()
+	g.CallLogoutHooks()
+
+	if g.TrackCache != nil {
+		g.TrackCache.Shutdown()
 	}
-	g.IdentifyCache = NewIdentifyCache()
-	g.FavoriteCache = favcache.New()
+	if g.Identify2Cache != nil {
+		g.Identify2Cache.Shutdown()
+	}
+	g.TrackCache = NewTrackCache()
+	g.Identify2Cache = NewIdentify2Cache(g.Env.GetUserCacheMaxAge())
 
 	// get a clean LoginState:
 	g.createLoginStateLocked()
@@ -119,9 +185,17 @@ func (g *GlobalContext) Logout() error {
 }
 
 func (g *GlobalContext) ConfigureLogging() error {
-	g.Log.Configure(g.Env.GetLogFormat(), g.Env.GetDebug(),
-		g.Env.GetLogFile())
+	style := g.Env.GetLogFormat()
+	debug := g.Env.GetDebug()
+	logFile := g.Env.GetLogFile()
+	if logFile == "" {
+		g.Log.Configure(style, debug, g.Env.GetDefaultLogFile())
+	} else {
+		g.Log.Configure(style, debug, logFile)
+		g.Log.RotateLogFile()
+	}
 	g.Output = os.Stdout
+	g.VDL.Configure(g.Env.GetVDebugSetting())
 	return nil
 }
 
@@ -130,7 +204,7 @@ func (g *GlobalContext) PushShutdownHook(sh ShutdownHook) {
 }
 
 func (g *GlobalContext) ConfigureConfig() error {
-	c := NewJSONConfigFile(g.Env.GetConfigFilename())
+	c := NewJSONConfigFile(g, g.Env.GetConfigFilename())
 	err := c.Load(false)
 	if err != nil {
 		return err
@@ -138,26 +212,25 @@ func (g *GlobalContext) ConfigureConfig() error {
 	if err = c.Check(); err != nil {
 		return err
 	}
-	g.Env.SetConfig(*c)
-	g.Env.SetConfigWriter(c)
-	return nil
-}
-
-func (g *GlobalContext) writeConfig() error {
-	cw := g.Env.GetConfigWriter()
-	if cw != nil {
-		return cw.Write()
-	}
+	g.Env.SetConfig(*c, c)
 	return nil
 }
 
 func (g *GlobalContext) ConfigReload() error {
-	// write the existing config just to be safe
-	if err := g.writeConfig(); err != nil {
-		return err
-	}
+	err := g.ConfigureConfig()
+	g.ConfigureUpdaterConfig()
+	return err
+}
 
-	return g.ConfigureConfig()
+func (g *GlobalContext) ConfigureUpdaterConfig() error {
+	c := NewJSONUpdaterConfigFile(g)
+	err := c.Load(false)
+	if err == nil {
+		g.Env.SetUpdaterConfig(*c)
+	} else {
+		g.Log.Debug("Failed to open update config: %s\n", err)
+	}
+	return err
 }
 
 func (g *GlobalContext) ConfigureTimers() error {
@@ -170,18 +243,18 @@ func (g *GlobalContext) ConfigureKeyring() error {
 	return nil
 }
 
-func VersionMessage(devel bool, linefn func(string)) {
-	linefn(fmt.Sprintf("Keybase CLI %s", VersionString(devel)))
+func VersionMessage(linefn func(string)) {
+	linefn(fmt.Sprintf("Keybase CLI %s", VersionString()))
 	linefn(fmt.Sprintf("- Built with %s", runtime.Version()))
 	linefn("- Visit https://keybase.io for more details")
 }
 
 func (g *GlobalContext) StartupMessage() {
-	VersionMessage(false, func(s string) { g.Log.Debug(s) })
+	VersionMessage(func(s string) { g.Log.Debug(s) })
 }
 
 func (g *GlobalContext) ConfigureAPI() error {
-	iapi, xapi, err := NewAPIEngines(g.Env)
+	iapi, xapi, err := NewAPIEngines(g)
 	if err != nil {
 		return fmt.Errorf("Failed to configure API access: %s", err)
 	}
@@ -191,15 +264,17 @@ func (g *GlobalContext) ConfigureAPI() error {
 }
 
 func (g *GlobalContext) ConfigureCaches() error {
-	g.ResolveCache = NewResolveCache()
-	g.IdentifyCache = NewIdentifyCache()
-	g.ProofCache = NewProofCache(g.Env.GetProofCacheSize())
-	g.FavoriteCache = favcache.New()
+	g.Resolver.EnableCaching()
+	g.TrackCache = NewTrackCache()
+	g.Identify2Cache = NewIdentify2Cache(g.Env.GetUserCacheMaxAge())
+	g.ProofCache = NewProofCache(g, g.Env.GetProofCacheSize())
+	g.LinkCache = NewLinkCache(g.Env.GetLinkCacheSize(), g.Env.GetLinkCacheCleanDur())
+	g.Log.Debug("Created LinkCache, max size: %d, clean dur: %s", g.Env.GetLinkCacheSize(), g.Env.GetLinkCacheCleanDur())
 
 	// We consider the local DB as a cache; it's caching our
 	// fetches from the server after all (and also our cryptographic
 	// checking).
-	g.LocalDb = NewJSONLocalDb(NewLevelDb())
+	g.LocalDb = NewJSONLocalDb(NewLevelDb(g))
 	return g.LocalDb.Open()
 }
 
@@ -213,56 +288,100 @@ func (g *GlobalContext) ConfigureExportedStreams() error {
 	return nil
 }
 
+// Shutdown is called exactly once per-process and does whatever
+// cleanup is necessary to shut down the server.
 func (g *GlobalContext) Shutdown() error {
-	if g.shutdown {
-		return nil
+	var err error
+	didShutdown := false
+
+	// Wrap in a Once.Do so that we don't inadvertedly
+	// run this code twice.
+	g.shutdownOnce.Do(func() {
+		g.Log.Debug("Calling shutdown first time through")
+		didShutdown = true
+
+		epick := FirstErrorPicker{}
+
+		if g.NotifyRouter != nil {
+			g.NotifyRouter.Shutdown()
+		}
+
+		if g.UIRouter != nil {
+			g.UIRouter.Shutdown()
+		}
+
+		if g.ConnectionManager != nil {
+			g.ConnectionManager.Shutdown()
+		}
+
+		if g.UI != nil {
+			epick.Push(g.UI.Shutdown())
+		}
+		if g.LocalDb != nil {
+			epick.Push(g.LocalDb.Close())
+		}
+		if g.LoginState() != nil {
+			epick.Push(g.LoginState().Shutdown())
+		}
+
+		if g.TrackCache != nil {
+			g.TrackCache.Shutdown()
+		}
+		if g.Identify2Cache != nil {
+			g.Identify2Cache.Shutdown()
+		}
+		if g.LinkCache != nil {
+			g.LinkCache.Shutdown()
+		}
+		if g.Resolver != nil {
+			g.Resolver.Shutdown()
+		}
+
+		for _, hook := range g.ShutdownHooks {
+			epick.Push(hook())
+		}
+
+		err = epick.Error()
+
+		g.Log.Debug("exiting shutdown code=%d; err=%v", g.ExitCode, err)
+	})
+
+	// Make a little bit of a statement if we wind up here a second time
+	// (which is a bug).
+	if !didShutdown {
+		g.Log.Debug("Skipped shutdown on second call")
 	}
 
-	epick := FirstErrorPicker{}
-
-	if g.UI != nil {
-		epick.Push(g.UI.Shutdown())
-	}
-	if g.LocalDb != nil {
-		epick.Push(g.LocalDb.Close())
-	}
-	if g.LoginState() != nil {
-		epick.Push(g.LoginState().Shutdown())
-	}
-
-	if g.IdentifyCache != nil {
-		g.IdentifyCache.Shutdown()
-	}
-
-	for _, hook := range g.ShutdownHooks {
-		epick.Push(hook())
-	}
-
-	epick.Push(g.writeConfig())
-
-	g.shutdown = true
-	return epick.Error()
+	return err
 }
 
 func (u Usage) UseKeyring() bool {
 	return u.KbKeyring || u.GpgKeyring
 }
 
-func (g *GlobalContext) ConfigureAll(line CommandLine, cmd Command) error {
-
-	g.SetCommandLine(line)
-
-	g.ConfigureLogging()
-
+func (g *GlobalContext) ConfigureCommand(line CommandLine, cmd Command) error {
 	usage := cmd.GetUsage()
+	return g.Configure(line, usage)
+}
+
+func (g *GlobalContext) Configure(line CommandLine, usage Usage) error {
+	g.SetCommandLine(line)
+	err := g.ConfigureLogging()
+	if err != nil {
+		return err
+	}
 	return g.ConfigureUsage(usage)
+}
+
+func (g *GlobalContext) NewProofChecker(l RemoteProofChainLink) (ProofChecker, ProofError) {
+	return g.ProofCheckerFactory.MakeProofChecker(l)
 }
 
 func (g *GlobalContext) ConfigureUsage(usage Usage) error {
 	var err error
 
 	if usage.Config {
-		if err = g.ConfigureConfig(); err != nil {
+		if err = g.ConfigReload(); err != nil {
 			return err
 		}
 	}
@@ -276,7 +395,7 @@ func (g *GlobalContext) ConfigureUsage(usage Usage) error {
 			return err
 		}
 	}
-	if usage.Socket || !G.Env.GetStandalone() {
+	if usage.Socket || !g.Env.GetStandalone() {
 		if err = g.ConfigureSocketInfo(); err != nil {
 			return err
 		}
@@ -316,7 +435,7 @@ func (g *GlobalContext) OutputBytes(b []byte) {
 
 func (g *GlobalContext) GetGpgClient() *GpgCLI {
 	if g.GpgClient == nil {
-		g.GpgClient = NewGpgCLI(GpgCLIArg{})
+		g.GpgClient = NewGpgCLI(g, nil)
 	}
 	return g.GpgClient
 }
@@ -335,7 +454,7 @@ func (g *GlobalContext) GetMyUID() keybase1.UID {
 }
 
 func (g *GlobalContext) ConfigureSocketInfo() (err error) {
-	g.SocketInfo, err = ConfigureSocketInfo()
+	g.SocketInfo, err = NewSocket(g)
 	return err
 }
 
@@ -353,6 +472,10 @@ func (c Contextified) G() *GlobalContext {
 	return G
 }
 
+func (c Contextified) GStrict() *GlobalContext {
+	return c.g
+}
+
 func (c *Contextified) SetGlobalContext(g *GlobalContext) { c.g = g }
 
 func NewContextified(gc *GlobalContext) Contextified {
@@ -361,4 +484,173 @@ func NewContextified(gc *GlobalContext) Contextified {
 
 type Contexitifier interface {
 	G() *GlobalContext
+}
+
+func (g *GlobalContext) GetConfiguredAccounts() ([]keybase1.ConfiguredAccount, error) {
+	return GetConfiguredAccounts(g, g.SecretStoreAll)
+}
+
+func (g *GlobalContext) GetAllUserNames() (NormalizedUsername, []NormalizedUsername, error) {
+	return g.Env.GetConfig().GetAllUsernames()
+}
+
+func (g *GlobalContext) GetStoredSecretServiceName() string {
+	return g.Env.GetStoredSecretServiceName()
+}
+
+func (g *GlobalContext) GetStoredSecretAccessGroup() string {
+	return g.Env.GetStoredSecretAccessGroup()
+}
+
+func (g *GlobalContext) GetUsersWithStoredSecrets() ([]string, error) {
+	if g.SecretStoreAll != nil {
+		return g.SecretStoreAll.GetUsersWithStoredSecrets()
+	}
+	return []string{}, nil
+}
+
+func (g *GlobalContext) GetCacheDir() string {
+	return g.Env.GetCacheDir()
+}
+
+func (g *GlobalContext) GetRuntimeDir() string {
+	return g.Env.GetRuntimeDir()
+}
+
+func (g *GlobalContext) GetRunMode() RunMode {
+	return g.Env.GetRunMode()
+}
+
+func (g *GlobalContext) Clock() clockwork.Clock {
+	g.clockMu.Lock()
+	defer g.clockMu.Unlock()
+	if g.clock == nil {
+		g.clock = clockwork.NewRealClock()
+	}
+	return g.clock
+}
+
+func (g *GlobalContext) SetClock(c clockwork.Clock) {
+	g.clockMu.Lock()
+	defer g.clockMu.Unlock()
+	g.clock = c
+}
+
+func (g *GlobalContext) GetMyClientDetails() keybase1.ClientDetails {
+	return keybase1.ClientDetails{
+		ClientType: keybase1.ClientType_CLI,
+		Pid:        os.Getpid(),
+		Argv:       os.Args,
+		Version:    VersionString(),
+	}
+}
+
+func (g *GlobalContext) GetUnforwardedLogger() *logger.UnforwardedLogger {
+	if g.Log == nil {
+		return nil
+	}
+	log, ok := g.Log.(*logger.Standard)
+	if !ok {
+		g.Log.Notice("Can't make Unforwarded logger from a non-standard logger")
+		return nil
+	}
+	return (*logger.UnforwardedLogger)(log)
+}
+
+func (g *GlobalContext) GetLog() logger.Logger {
+	return g.Log
+}
+
+// GetLogf returns a logger with a minimal formatter style interface
+func (g *GlobalContext) GetLogf() logger.Loggerf {
+	return logger.NewLoggerf(g.Log)
+}
+
+func (g *GlobalContext) AddLoginHook(hook LoginHook) {
+	g.hookMu.Lock()
+	defer g.hookMu.Unlock()
+	g.loginHooks = append(g.loginHooks, hook)
+}
+
+func (g *GlobalContext) CallLoginHooks() {
+	g.hookMu.RLock()
+	defer g.hookMu.RUnlock()
+	for _, h := range g.loginHooks {
+		if err := h.OnLogin(); err != nil {
+			g.Log.Warning("OnLogin hook error: %s", err)
+		}
+	}
+}
+
+func (g *GlobalContext) AddLogoutHook(hook LogoutHook) {
+	g.hookMu.Lock()
+	defer g.hookMu.Unlock()
+	g.logoutHooks = append(g.logoutHooks, hook)
+}
+
+func (g *GlobalContext) CallLogoutHooks() {
+	g.hookMu.RLock()
+	defer g.hookMu.RUnlock()
+	for _, h := range g.logoutHooks {
+		if err := h.OnLogout(); err != nil {
+			g.Log.Warning("OnLogout hook error: %s", err)
+		}
+	}
+}
+
+func (g *GlobalContext) GetAppStartMode() (AppStartMode, error) {
+	return g.Env.GetAppStartMode()
+}
+
+func (g *GlobalContext) GetConfigDir() string {
+	return g.Env.GetConfigDir()
+}
+
+func (g *GlobalContext) GetMountDir() (string, error) {
+	return g.Env.GetMountDir()
+}
+
+// GetServiceInfoPath returns path to info file written by the Keybase service after startup
+func (g *GlobalContext) GetServiceInfoPath() string {
+	return g.Env.GetServiceInfoPath()
+}
+
+// GetKBFSInfoPath returns path to info file written by the KBFS service after startup
+func (g *GlobalContext) GetKBFSInfoPath() string {
+	return g.Env.GetKBFSInfoPath()
+}
+
+func (g *GlobalContext) GetLogDir() string {
+	return g.Env.GetLogDir()
+}
+
+func (g *GlobalContext) NewRPCLogFactory() *RPCLogFactory {
+	return &RPCLogFactory{Contextified: NewContextified(g)}
+}
+
+// LogoutIfRevoked loads the user and checks if the current device keys
+// have been revoked.  If so, it calls Logout.
+func (g *GlobalContext) LogoutIfRevoked() error {
+	in, err := g.LoginState().LoggedInLoad()
+	if err != nil {
+		return err
+	}
+	if !in {
+		g.Log.Debug("LogoutIfRevoked: skipping check (not logged in)")
+		return nil
+	}
+
+	me, err := LoadMe(NewLoadUserForceArg(g))
+	if err != nil {
+		return err
+	}
+
+	if !me.HasCurrentDeviceInCurrentInstall() {
+		g.Log.Debug("LogoutIfRevoked: current device revoked, calling logout")
+		return g.Logout()
+	}
+
+	g.Log.Debug("LogoutIfRevoked: current device ok")
+
+	return nil
 }

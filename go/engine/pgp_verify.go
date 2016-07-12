@@ -1,3 +1,6 @@
+// Copyright 2015 Keybase, Inc. All rights reserved. Use of
+// this source code is governed by the included BSD license.
+
 package engine
 
 import (
@@ -8,22 +11,22 @@ import (
 	"io/ioutil"
 
 	"github.com/keybase/client/go/libkb"
-	keybase1 "github.com/keybase/client/protocol/go"
-	"golang.org/x/crypto/openpgp"
-	"golang.org/x/crypto/openpgp/clearsign"
+	"github.com/keybase/go-crypto/openpgp"
+	"github.com/keybase/go-crypto/openpgp/armor"
+	"github.com/keybase/go-crypto/openpgp/clearsign"
+	"github.com/keybase/go-crypto/openpgp/packet"
 )
 
 type PGPVerifyArg struct {
-	Source       io.Reader
-	Signature    []byte
-	SignedBy     string
-	TrackOptions keybase1.TrackOptions
+	Source    io.Reader
+	Signature []byte
+	SignedBy  string
 }
 
 // PGPVerify is an engine.
 type PGPVerify struct {
 	arg        *PGPVerifyArg
-	peek       *libkb.Peeker
+	source     io.Reader
 	signStatus *libkb.SignatureStatus
 	owner      *libkb.User
 	libkb.Contextified
@@ -49,7 +52,7 @@ func (e *PGPVerify) Prereqs() Prereqs {
 
 // RequiredUIs returns the required UIs.
 func (e *PGPVerify) RequiredUIs() []libkb.UIKind {
-	return []libkb.UIKind{}
+	return []libkb.UIKind{libkb.PgpUIKind}
 }
 
 // SubConsumers returns the other UI consumers for this engine.
@@ -63,14 +66,28 @@ func (e *PGPVerify) SubConsumers() []libkb.UIConsumer {
 
 // Run starts the engine.
 func (e *PGPVerify) Run(ctx *Context) error {
-	e.peek = libkb.NewPeeker(e.arg.Source)
-	if libkb.IsClearsign(e.peek) {
-		return e.runClearsign(ctx)
+	var err error
+	defer e.G().Trace("PGPVerify::Run", func() error { return err })()
+	var sc libkb.StreamClassification
+	sc, e.source, err = libkb.ClassifyStream(e.arg.Source)
+
+	// For a Detached signature, we'll be expecting an UnknownStreamError
+	if err != nil {
+		if _, ok := err.(libkb.UnknownStreamError); !ok || len(e.arg.Signature) == 0 {
+			return err
+		}
+	}
+
+	if sc.Format == libkb.CryptoMessageFormatPGP && sc.Type == libkb.CryptoMessageTypeClearSignature {
+		err = e.runClearsign(ctx)
+		return err
 	}
 	if len(e.arg.Signature) == 0 {
-		return e.runAttached(ctx)
+		err = e.runAttached(ctx)
+		return err
 	}
-	return e.runDetached(ctx)
+	err = e.runDetached(ctx)
+	return err
 }
 
 func (e *PGPVerify) SignatureStatus() *libkb.SignatureStatus {
@@ -84,10 +101,10 @@ func (e *PGPVerify) Owner() *libkb.User {
 // runAttached verifies an attached signature
 func (e *PGPVerify) runAttached(ctx *Context) error {
 	arg := &PGPDecryptArg{
-		Source:       e.peek,
+		Source:       e.source,
 		Sink:         libkb.NopWriteCloser{W: ioutil.Discard},
 		AssertSigned: true,
-		TrackOptions: e.arg.TrackOptions,
+		SignedBy:     e.arg.SignedBy,
 	}
 	eng := NewPGPDecrypt(arg, e.G())
 	if err := RunEngine(eng, ctx); err != nil {
@@ -96,16 +113,12 @@ func (e *PGPVerify) runAttached(ctx *Context) error {
 	e.signStatus = eng.SignatureStatus()
 	e.owner = eng.Owner()
 
-	if err := e.checkSignedBy(ctx); err != nil {
-		return err
-	}
-
 	return nil
 }
 
 // runDetached verifies a detached signature
 func (e *PGPVerify) runDetached(ctx *Context) error {
-	sk, err := NewScanKeys(ctx.SecretUI, ctx.IdentifyUI, &e.arg.TrackOptions, e.G())
+	sk, err := NewScanKeys(ctx.SecretUI, e.G())
 	if err != nil {
 		return err
 	}
@@ -113,7 +126,7 @@ func (e *PGPVerify) runDetached(ctx *Context) error {
 	if libkb.IsArmored(e.arg.Signature) {
 		checkfn = openpgp.CheckArmoredDetachedSignature
 	}
-	signer, err := checkfn(sk, e.peek, bytes.NewReader(e.arg.Signature))
+	signer, err := checkfn(sk, e.source, bytes.NewReader(e.arg.Signature))
 	if err != nil {
 		return err
 	}
@@ -127,7 +140,27 @@ func (e *PGPVerify) runDetached(ctx *Context) error {
 		if err := e.checkSignedBy(ctx); err != nil {
 			return err
 		}
-		e.outputSuccess(ctx, signer, sk.Owner())
+
+		var r io.Reader = bytes.NewReader(e.arg.Signature)
+		if libkb.IsArmored(e.arg.Signature) {
+			block, err := armor.Decode(r)
+			if err != nil {
+				return err
+			}
+			r = block.Body
+		}
+
+		p, err := packet.Read(r)
+		if err != nil {
+			return err
+		}
+
+		if val, ok := p.(*packet.Signature); ok {
+			e.signStatus.SignatureTime = val.CreationTime
+		}
+
+		fingerprint := libkb.PGPFingerprint(signer.PrimaryKey.Fingerprint)
+		OutputSignatureSuccess(ctx, fingerprint, sk.Owner(), e.signStatus.SignatureTime)
 	}
 
 	return nil
@@ -137,7 +170,7 @@ func (e *PGPVerify) runDetached(ctx *Context) error {
 func (e *PGPVerify) runClearsign(ctx *Context) error {
 	// clearsign decode only works with the whole data slice, not a reader
 	// so have to read it all here:
-	msg, err := ioutil.ReadAll(e.peek)
+	msg, err := ioutil.ReadAll(e.source)
 	if err != nil {
 		return err
 	}
@@ -146,11 +179,17 @@ func (e *PGPVerify) runClearsign(ctx *Context) error {
 		return errors.New("Unable to decode clearsigned message")
 	}
 
-	sk, err := NewScanKeys(ctx.SecretUI, ctx.IdentifyUI, &e.arg.TrackOptions, e.G())
+	sigBody, err := ioutil.ReadAll(b.ArmoredSignature.Body)
 	if err != nil {
 		return err
 	}
-	signer, err := openpgp.CheckDetachedSignature(sk, bytes.NewReader(b.Bytes), b.ArmoredSignature.Body)
+
+	sk, err := NewScanKeys(ctx.SecretUI, e.G())
+	if err != nil {
+		return err
+	}
+
+	signer, err := openpgp.CheckDetachedSignature(sk, bytes.NewReader(b.Bytes), bytes.NewReader(sigBody))
 	if err != nil {
 		return fmt.Errorf("Check sig error: %s", err)
 	}
@@ -164,7 +203,18 @@ func (e *PGPVerify) runClearsign(ctx *Context) error {
 		if err := e.checkSignedBy(ctx); err != nil {
 			return err
 		}
-		e.outputSuccess(ctx, signer, sk.Owner())
+
+		p, err := packet.Read(bytes.NewReader(sigBody))
+		if err != nil {
+			return err
+		}
+
+		if val, ok := p.(*packet.Signature); ok {
+			e.signStatus.SignatureTime = val.CreationTime
+		}
+
+		fingerprint := libkb.PGPFingerprint(signer.PrimaryKey.Fingerprint)
+		OutputSignatureSuccess(ctx, fingerprint, sk.Owner(), e.signStatus.SignatureTime)
 	}
 
 	return nil
@@ -205,9 +255,4 @@ func (e *PGPVerify) checkSignedBy(ctx *Context) error {
 	}
 
 	return nil
-}
-
-func (e *PGPVerify) outputSuccess(ctx *Context, signer *openpgp.Entity, owner *libkb.User) {
-	fingerprint := libkb.PGPFingerprint(signer.PrimaryKey.Fingerprint)
-	ctx.LogUI.Notice("Signature verified. Signed by %s. PGP Fingerprint: %s", owner.GetName(), fingerprint)
 }

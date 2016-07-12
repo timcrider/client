@@ -1,3 +1,6 @@
+// Copyright 2015 Keybase, Inc. All rights reserved. Use of
+// this source code is governed by the included BSD license.
+
 package libkb
 
 import "errors"
@@ -29,6 +32,7 @@ func DelegatorAggregator(lctx LoginContext, ds []Delegator) (err error) {
 	payload := make(JSONPayload)
 	payload["sigs"] = args
 
+	// XXX what's the purpose of this?
 	if err != nil {
 		return err
 	}

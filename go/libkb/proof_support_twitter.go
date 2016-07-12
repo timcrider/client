@@ -1,3 +1,6 @@
+// Copyright 2015 Keybase, Inc. All rights reserved. Use of
+// this source code is governed by the included BSD license.
+
 package libkb
 
 import (
@@ -5,7 +8,7 @@ import (
 	"strings"
 
 	"github.com/PuerkitoBio/goquery"
-	keybase1 "github.com/keybase/client/protocol/go"
+	keybase1 "github.com/keybase/client/go/protocol"
 	jsonw "github.com/keybase/go-jsonw"
 )
 
@@ -20,6 +23,8 @@ type TwitterChecker struct {
 func NewTwitterChecker(p RemoteProofChainLink) (*TwitterChecker, ProofError) {
 	return &TwitterChecker{p}, nil
 }
+
+func (rc *TwitterChecker) GetTorError() ProofError { return nil }
 
 func (rc *TwitterChecker) CheckHint(h SigHint) ProofError {
 	wantedURL := ("https://twitter.com/" + strings.ToLower(rc.proof.GetRemoteUsername()) + "/")
@@ -63,6 +68,8 @@ func (rc *TwitterChecker) findSigInTweet(h SigHint, s *goquery.Selection) ProofE
 			G.Log.Debug("| Stripping off @prefx: %s", prefix)
 		}
 	}
+	inside = WhitespaceNormalize(inside)
+	checkText = WhitespaceNormalize(checkText)
 	if strings.HasPrefix(inside, checkText) {
 		return nil
 	}
@@ -111,21 +118,21 @@ func (rc *TwitterChecker) CheckStatus(h SigHint) ProofError {
 
 type TwitterServiceType struct{ BaseServiceType }
 
-func (t TwitterServiceType) AllStringKeys() []string     { return t.BaseAllStringKeys(t) }
-func (t TwitterServiceType) PrimaryStringKeys() []string { return t.BasePrimaryStringKeys(t) }
+func (t TwitterServiceType) AllStringKeys() []string { return t.BaseAllStringKeys(t) }
 
-func (t TwitterServiceType) CheckUsername(s string) (err error) {
-	if !regexp.MustCompile(`^@?(?i:[a-z0-9_]{1,20})$`).MatchString(s) {
-		err = BadUsernameError{s}
-	}
-	return
-}
+var twitterUsernameRegexp = regexp.MustCompile(`^(?i:[a-z0-9_]{1,20})$`)
 
 func (t TwitterServiceType) NormalizeUsername(s string) (string, error) {
-	if len(s) > 0 && s[0] == '@' {
-		s = s[1:]
+	if !twitterUsernameRegexp.MatchString(s) {
+		return "", BadUsernameError{s}
 	}
 	return strings.ToLower(s), nil
+}
+
+func (t TwitterServiceType) NormalizeRemoteName(s string) (string, error) {
+	// Allow a leading '@'.
+	s = strings.TrimPrefix(s, "@")
+	return t.NormalizeUsername(s)
 }
 
 func (t TwitterServiceType) ToChecker() Checker {
@@ -147,9 +154,9 @@ func (t TwitterServiceType) PostInstructions(un string) *Markup {
 func (t TwitterServiceType) DisplayName(un string) string { return "Twitter" }
 func (t TwitterServiceType) GetTypeName() string          { return "twitter" }
 
-func (t TwitterServiceType) RecheckProofPosting(tryNumber int, status keybase1.ProofStatus) (warning *Markup, err error) {
+func (t TwitterServiceType) RecheckProofPosting(tryNumber int, status keybase1.ProofStatus, _ string) (warning *Markup, err error) {
 	if status == keybase1.ProofStatus_PERMISSION_DENIED {
-		warning = FmtMarkup("Permission denied! We can't suppport <strong>private</strong feeds.")
+		warning = FmtMarkup("Permission denied! We can't support <strong>private</strong> feeds.")
 	} else {
 		warning, err = t.BaseRecheckProofPosting(tryNumber, status)
 	}
@@ -166,7 +173,7 @@ func (t TwitterServiceType) CheckProofText(text string, id keybase1.SigID, sig s
 func init() {
 	RegisterServiceType(TwitterServiceType{})
 	RegisterSocialNetwork("twitter")
-	RegisterProofCheckHook("twitter",
+	RegisterMakeProofCheckerFunc("twitter",
 		func(l RemoteProofChainLink) (ProofChecker, ProofError) {
 			return NewTwitterChecker(l)
 		})

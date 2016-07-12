@@ -1,3 +1,6 @@
+// Copyright 2015 Keybase, Inc. All rights reserved. Use of
+// this source code is governed by the included BSD license.
+
 package engine
 
 import (
@@ -5,7 +8,6 @@ import (
 	"testing"
 
 	"github.com/keybase/client/go/libkb"
-	// keybase_1 "github.com/keybase/client/protocol/go"
 )
 
 func getCurrentBTCAddr(tc libkb.TestContext, username string) string {

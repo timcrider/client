@@ -1,18 +1,23 @@
+// Copyright 2015 Keybase, Inc. All rights reserved. Use of
+// this source code is governed by the included BSD license.
+
 package client
 
 import (
 	"fmt"
 	"strings"
 
+	"golang.org/x/net/context"
+
 	"github.com/keybase/cli"
 	"github.com/keybase/client/go/libcmdline"
 	"github.com/keybase/client/go/libkb"
-	keybase1 "github.com/keybase/client/protocol/go"
+	keybase1 "github.com/keybase/client/go/protocol"
 	jsonw "github.com/keybase/go-jsonw"
-	"github.com/maxtaco/go-framed-msgpack-rpc/rpc2"
 )
 
 type CmdSearch struct {
+	libkb.Contextified
 	query string
 	json  bool
 }
@@ -27,24 +32,21 @@ func (c *CmdSearch) ParseArgv(ctx *cli.Context) error {
 }
 
 func (c *CmdSearch) Run() (err error) {
-	cli, err := GetUserClient()
+	cli, err := GetUserClient(c.G())
 	if err != nil {
 		return err
 	}
 
-	protocols := []rpc2.Protocol{
-		NewLogUIProtocol(),
-	}
-	if err = RegisterProtocols(protocols); err != nil {
+	if err = RegisterProtocols(nil); err != nil {
 		return err
 	}
 
-	results, err := cli.Search(keybase1.SearchArg{Query: c.query})
+	results, err := cli.Search(context.TODO(), keybase1.SearchArg{Query: c.query})
 	if err != nil {
 		return err
 	}
 
-	userSummaries, err := UserSummariesForSearchResults(results)
+	userSummaries, err := UserSummariesForSearchResults(results, c.G())
 	if err != nil {
 		return err
 	}
@@ -52,17 +54,23 @@ func (c *CmdSearch) Run() (err error) {
 	return c.showResults(userSummaries)
 }
 
-func UserSummariesForSearchResults(results []keybase1.SearchResult) ([]keybase1.UserSummary, error) {
-	cli, err := GetUserClient()
+func UserSummariesForSearchResults(results []keybase1.SearchResult,
+	g *libkb.GlobalContext) ([]keybase1.UserSummary, error) {
+
+	cli, err := GetUserClient(g)
 	if err != nil {
 		return nil, err
+	}
+	// Don't bother if no results.
+	if len(results) == 0 {
+		return nil, nil
 	}
 
 	uids := make([]keybase1.UID, len(results))
 	for i := range results {
 		uids[i] = results[i].Uid
 	}
-	userSummaries, err := cli.LoadUncheckedUserSummaries(keybase1.LoadUncheckedUserSummariesArg{Uids: uids})
+	userSummaries, err := cli.LoadUncheckedUserSummaries(context.TODO(), keybase1.LoadUncheckedUserSummariesArg{Uids: uids})
 	if err != nil {
 		return nil, err
 	}
@@ -125,7 +133,7 @@ func (c *CmdSearch) showJSONResults(results []keybase1.UserSummary) error {
 	return nil
 }
 
-func NewCmdSearch(cl *libcmdline.CommandLine) cli.Command {
+func NewCmdSearch(cl *libcmdline.CommandLine, g *libkb.GlobalContext) cli.Command {
 	return cli.Command{
 		Name:         "search",
 		ArgumentHelp: "<query>",
@@ -137,7 +145,7 @@ func NewCmdSearch(cl *libcmdline.CommandLine) cli.Command {
 			},
 		},
 		Action: func(c *cli.Context) {
-			cl.ChooseCommand(&CmdSearch{}, "search", c)
+			cl.ChooseCommand(&CmdSearch{Contextified: libkb.NewContextified(g)}, "search", c)
 		},
 	}
 }

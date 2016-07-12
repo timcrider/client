@@ -1,19 +1,26 @@
+// Copyright 2015 Keybase, Inc. All rights reserved. Use of
+// this source code is governed by the included BSD license.
+
 package client
 
 import (
 	"fmt"
 	"io/ioutil"
 	"os"
+	"strings"
+
+	"golang.org/x/net/context"
 
 	"github.com/keybase/cli"
 	"github.com/keybase/client/go/libcmdline"
 	"github.com/keybase/client/go/libkb"
-	keybase1 "github.com/keybase/client/protocol/go"
-	"github.com/maxtaco/go-framed-msgpack-rpc/rpc2"
+	keybase1 "github.com/keybase/client/go/protocol"
+	rpc "github.com/keybase/go-framed-msgpack-rpc"
 )
 
 // CmdProve is the wrapper structure for the the `keybase prove` operation.
 type CmdProve struct {
+	libkb.Contextified
 	arg    keybase1.StartProofArg
 	output string
 }
@@ -21,44 +28,55 @@ type CmdProve struct {
 // ParseArgv parses arguments for the prove command.
 func (p *CmdProve) ParseArgv(ctx *cli.Context) error {
 	nargs := len(ctx.Args())
-	var err error
 	p.arg.Force = ctx.Bool("force")
 	p.output = ctx.String("output")
 
 	if nargs > 2 || nargs == 0 {
-		err = fmt.Errorf("prove takes 1 or args: <service> [<username>]")
-	} else {
-		p.arg.Service = ctx.Args()[0]
-		if nargs == 2 {
-			p.arg.Username = ctx.Args()[1]
+		return fmt.Errorf("prove takes 1 or 2 args: <service> [<username>]")
+	}
+	p.arg.Service = ctx.Args()[0]
+	if nargs == 2 {
+		p.arg.Username = ctx.Args()[1]
+	}
+
+	if libkb.RemoteServiceTypes[p.arg.Service] == keybase1.ProofType_ROOTER {
+		p.arg.Auto = ctx.Bool("auto")
+		if p.arg.Auto && len(p.arg.Username) == 0 {
+			return fmt.Errorf("must specify the username when using auto flag")
 		}
 	}
-	return err
+	return nil
 }
 
 func (p *CmdProve) fileOutputHook(txt string) (err error) {
-	G.Log.Info("Writing proof to file '" + p.output + "'...")
+	p.G().Log.Info("Writing proof to file '" + p.output + "'...")
 	err = ioutil.WriteFile(p.output, []byte(txt), os.FileMode(0644))
-	G.Log.Info("Written.")
+	p.G().Log.Info("Written.")
 	return
-}
-
-func newProveUIProtocol(ui ProveUI) rpc2.Protocol {
-	return keybase1.ProveUiProtocol(ui)
 }
 
 // RunClient runs the `keybase prove` subcommand in client/server mode.
 func (p *CmdProve) Run() error {
 	var cli keybase1.ProveClient
 
-	proveUI := ProveUI{parent: GlobUI}
-	p.installOutputHook(&proveUI)
+	var proveUIProtocol rpc.Protocol
 
-	protocols := []rpc2.Protocol{
-		newProveUIProtocol(proveUI),
-		NewLoginUIProtocol(),
-		NewSecretUIProtocol(),
-		NewLogUIProtocol(),
+	if p.arg.Auto {
+		ui := &ProveRooterUI{
+			Contextified: libkb.NewContextified(p.G()),
+			Username:     p.arg.Username,
+		}
+		proveUIProtocol = keybase1.ProveUiProtocol(ui)
+	} else {
+		proveUI := ProveUI{parent: GlobUI}
+		p.installOutputHook(&proveUI)
+		proveUIProtocol = keybase1.ProveUiProtocol(proveUI)
+	}
+
+	protocols := []rpc.Protocol{
+		proveUIProtocol,
+		NewLoginUIProtocol(p.G()),
+		NewSecretUIProtocol(p.G()),
 	}
 
 	cli, err := GetProveClient()
@@ -72,7 +90,7 @@ func (p *CmdProve) Run() error {
 	// command line interface wants the PromptPosted ui loop
 	p.arg.PromptPosted = true
 
-	_, err = cli.StartProof(p.arg)
+	_, err = cli.StartProof(context.TODO(), p.arg)
 	return err
 }
 
@@ -85,11 +103,14 @@ func (p *CmdProve) installOutputHook(ui *ProveUI) {
 }
 
 // NewCmdProve makes a new prove command from the given CLI parameters.
-func NewCmdProve(cl *libcmdline.CommandLine) cli.Command {
-	return cli.Command{
+func NewCmdProve(cl *libcmdline.CommandLine, g *libkb.GlobalContext) cli.Command {
+	serviceList := strings.Join(libkb.ListProofCheckers(), ", ")
+	description := fmt.Sprintf("Supported services are: %s.", serviceList)
+	cmd := cli.Command{
 		Name:         "prove",
-		ArgumentHelp: "<service> [username]",
+		ArgumentHelp: "<service> [service username]",
 		Usage:        "Generate a new proof",
+		Description:  description,
 		Flags: []cli.Flag{
 			cli.StringFlag{
 				Name:  "output, o",
@@ -101,9 +122,11 @@ func NewCmdProve(cl *libcmdline.CommandLine) cli.Command {
 			},
 		},
 		Action: func(c *cli.Context) {
-			cl.ChooseCommand(&CmdProve{}, "prove", c)
+			cl.ChooseCommand(&CmdProve{Contextified: libkb.NewContextified(g)}, "prove", c)
 		},
 	}
+	cmd.Flags = append(cmd.Flags, restrictedProveFlags...)
+	return cmd
 }
 
 // GetUsage specifics the library features that the prove command needs.

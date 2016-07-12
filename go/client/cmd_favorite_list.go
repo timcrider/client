@@ -1,13 +1,18 @@
+// Copyright 2015 Keybase, Inc. All rights reserved. Use of
+// this source code is governed by the included BSD license.
+
 package client
 
 import (
 	"errors"
 	"path/filepath"
 
+	"golang.org/x/net/context"
+
 	"github.com/keybase/cli"
 	"github.com/keybase/client/go/libcmdline"
 	"github.com/keybase/client/go/libkb"
-	keybase1 "github.com/keybase/client/protocol/go"
+	keybase1 "github.com/keybase/client/go/protocol"
 )
 
 type CmdFavoriteList struct{}
@@ -37,12 +42,12 @@ func (c *CmdFavoriteList) GetUsage() libkb.Usage {
 }
 
 func (c *CmdFavoriteList) Run() error {
-	arg := keybase1.FavoriteListArg{}
-	folders, err := list(arg)
+	arg := keybase1.GetFavoritesArg{}
+	result, err := list(arg)
 	if err != nil {
 		return err
 	}
-	for _, f := range folders {
+	for _, f := range result.FavoriteFolders {
 		acc := "public"
 		if f.Private {
 			acc = "private"
@@ -52,10 +57,10 @@ func (c *CmdFavoriteList) Run() error {
 	return nil
 }
 
-func list(arg keybase1.FavoriteListArg) ([]keybase1.Folder, error) {
+func list(arg keybase1.GetFavoritesArg) (keybase1.FavoritesResult, error) {
 	cli, err := GetFavoriteClient()
 	if err != nil {
-		return nil, err
+		return keybase1.FavoritesResult{}, err
 	}
-	return cli.FavoriteList(0)
+	return cli.GetFavorites(context.TODO(), 0)
 }

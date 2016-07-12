@@ -1,3 +1,6 @@
+// Copyright 2015 Keybase, Inc. All rights reserved. Use of
+// this source code is governed by the included BSD license.
+
 package libkb
 
 import (
@@ -5,7 +8,7 @@ import (
 	"errors"
 	"fmt"
 
-	keybase1 "github.com/keybase/client/protocol/go"
+	keybase1 "github.com/keybase/client/go/protocol"
 	"golang.org/x/crypto/nacl/secretbox"
 )
 
@@ -85,10 +88,10 @@ func (s *LKSec) GetServerHalf() []byte {
 	return s.serverHalf
 }
 
-func (s *LKSec) Load(lctx LoginContext) error {
+func (s *LKSec) Load(lctx LoginContext) (err error) {
 	s.G().Log.Debug("+ LKSec::Load()")
 	defer func() {
-		s.G().Log.Debug("- LKSec::Load()")
+		s.G().Log.Debug("- LKSec::Load() -> %s", ErrToOk(err))
 	}()
 
 	if s.secret != nil {
@@ -97,44 +100,60 @@ func (s *LKSec) Load(lctx LoginContext) error {
 	}
 
 	if len(s.clientHalf) == 0 {
-		return fmt.Errorf("client half not set")
+		err = fmt.Errorf("client half not set")
+		return err
 	}
 
-	if len(s.serverHalf) == 0 {
-		s.G().Log.Debug("| Fetching secret key")
-		devid := s.G().Env.GetDeviceID()
-		if devid.IsNil() {
-			return fmt.Errorf("no device id set")
-		}
-
-		if err := s.apiServerHalf(lctx, devid); err != nil {
-			return err
-		}
-		if len(s.serverHalf) == 0 {
-			return fmt.Errorf("after apiServerHalf(%s), serverHalf still empty", devid)
-		}
-	} else {
-		s.G().Log.Debug("| ServerHalf already loaded")
+	if err = s.LoadServerHalf(lctx); err != nil {
+		return err
 	}
 
 	if len(s.clientHalf) != len(s.serverHalf) {
-		return fmt.Errorf("client/server halves len mismatch: len(client) == %d, len(server) = %d", len(s.clientHalf), len(s.serverHalf))
+		err = fmt.Errorf("client/server halves len mismatch: len(client) == %d, len(server) = %d", len(s.clientHalf), len(s.serverHalf))
+		return err
 	}
 
 	s.secret = make([]byte, len(s.serverHalf))
 	XORBytes(s.secret, s.serverHalf, s.clientHalf)
-	s.G().Log.Debug("| Making XOR'ed secret key for Local Key Security (LKS): ServerHalf=%x; clientHalf=%x", s.serverHalf, s.clientHalf)
+	s.G().Log.Debug("| Making XOR'ed secret key for Local Key Security (LKS)")
 
 	return nil
 }
 
-func (s *LKSec) GetSecret() (secret []byte, err error) {
-	s.G().Log.Debug("+ LKsec:GetSecret()")
+func (s *LKSec) LoadServerHalf(lctx LoginContext) (err error) {
+	s.G().Log.Debug("+ LKSec::LoadServerHalf()")
 	defer func() {
-		s.G().Log.Debug("- LKSec::GetSecret()")
+		s.G().Log.Debug("- LKSec::LoadServerHalf() -> %s", ErrToOk(err))
 	}()
 
-	if err = s.Load(nil); err != nil {
+	if len(s.serverHalf) != 0 {
+		s.G().Log.Debug("| short-circuit: already have serverHalf")
+		return nil
+	}
+	s.G().Log.Debug("| Fetching server half")
+	devid := s.G().Env.GetDeviceID()
+	if devid.IsNil() {
+		return fmt.Errorf("lksec load: no device id set, thus can't fetch server half")
+	}
+
+	if err = s.apiServerHalf(lctx, devid); err != nil {
+		s.G().Log.Debug("apiServerHalf(%s) error: %s", devid, err)
+		return err
+	}
+	if len(s.serverHalf) == 0 {
+		return fmt.Errorf("after apiServerHalf(%s), serverHalf still empty", devid)
+	}
+
+	return nil
+}
+
+func (s *LKSec) GetSecret(lctx LoginContext) (secret []byte, err error) {
+	s.G().Log.Debug("+ LKsec:GetSecret()")
+	defer func() {
+		s.G().Log.Debug("- LKSec::GetSecret() -> %s", ErrToOk(err))
+	}()
+
+	if err = s.Load(lctx); err != nil {
 		return
 	}
 
@@ -142,16 +161,17 @@ func (s *LKSec) GetSecret() (secret []byte, err error) {
 	return
 }
 
-func (s *LKSec) Encrypt(src []byte) ([]byte, error) {
+func (s *LKSec) Encrypt(src []byte) (res []byte, err error) {
 	s.G().Log.Debug("+ LKsec:Encrypt()")
 	defer func() {
-		s.G().Log.Debug("- LKSec::Encrypt()")
+		s.G().Log.Debug("- LKSec::Encrypt() -> %s", ErrToOk(err))
 	}()
 
-	if err := s.Load(nil); err != nil {
+	if err = s.Load(nil); err != nil {
 		return nil, err
 	}
-	nonce, err := RandBytes(24)
+	var nonce []byte
+	nonce, err = RandBytes(24)
 	if err != nil {
 		return nil, err
 	}
@@ -163,14 +183,14 @@ func (s *LKSec) Encrypt(src []byte) ([]byte, error) {
 	return append(nonce, box...), nil
 }
 
-func (s *LKSec) Decrypt(lctx LoginContext, src []byte) ([]byte, PassphraseGeneration, error) {
+func (s *LKSec) Decrypt(lctx LoginContext, src []byte) (res []byte, gen PassphraseGeneration, err error) {
 	s.G().Log.Debug("+ LKsec:Decrypt()")
 	defer func() {
-		s.G().Log.Debug("- LKSec::Decrypt()")
+		s.G().Log.Debug("- LKSec::Decrypt() -> %s", ErrToOk(err))
 	}()
 
-	if err := s.Load(lctx); err != nil {
-		return nil, 0, fmt.Errorf("lksec decrypt Load err: %s", err)
+	if err = s.Load(lctx); err != nil {
+		return nil, 0, err
 	}
 	var nonce [24]byte
 	copy(nonce[:], src[0:24])
@@ -178,7 +198,8 @@ func (s *LKSec) Decrypt(lctx LoginContext, src []byte) ([]byte, PassphraseGenera
 	fs := s.fsecret()
 	res, ok := secretbox.Open(nil, data, &nonce, &fs)
 	if !ok {
-		return nil, 0, PassphraseError{"failed to open secretbox"}
+		err = PassphraseError{"failed to open secretbox"}
+		return nil, 0, err
 	}
 
 	return res, s.ppGen, nil
@@ -224,7 +245,7 @@ func (s *LKSec) apiServerHalf(lctx LoginContext, devid keybase1.DeviceID) error 
 
 // NewLKSForEncrypt gets a verified passphrase stream, and returns
 // an LKS that works for encryption.
-func NewLKSForEncrypt(ui SecretUI, uid keybase1.UID, gc *GlobalContext) (ret *LKSec, err error) {
+func NewLKSecForEncrypt(ui SecretUI, uid keybase1.UID, gc *GlobalContext) (ret *LKSec, err error) {
 	var pps *PassphraseStream
 	if pps, err = gc.LoginState().GetPassphraseStream(ui); err != nil {
 		return
@@ -234,7 +255,7 @@ func NewLKSForEncrypt(ui SecretUI, uid keybase1.UID, gc *GlobalContext) (ret *LK
 }
 
 // EncryptClientHalfRecovery takes the client half of the LKS secret
-// and ecrypts it for the given key.  This is for recovery of passphrases
+// and encrypts it for the given key.  This is for recovery of passphrases
 // on device recovery operations.
 func (s *LKSec) EncryptClientHalfRecovery(key GenericKey) (string, error) {
 	return key.EncryptToString(s.clientHalf, nil)

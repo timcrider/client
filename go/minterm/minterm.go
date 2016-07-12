@@ -1,26 +1,30 @@
-// +build darwin dragonfly freebsd linux nacl netbsd openbsd solaris
+// Copyright 2015 Keybase, Inc. All rights reserved. Use of
+// this source code is governed by the included BSD license.
 
 // Package minterm implements minimal terminal functions.
 package minterm
 
 import (
-	"bufio"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"strings"
+	"sync"
 
-	"github.com/keybase/gopass"
-	"golang.org/x/crypto/ssh/terminal"
+	"github.com/keybase/go-crypto/ssh/terminal"
 )
 
 // MinTerm is a minimal terminal interface.
 type MinTerm struct {
-	tty    *os.File
-	in     *os.File
-	out    *os.File
-	width  int
-	height int
+	termIn       *os.File
+	termOut      *os.File
+	closeTermOut bool
+	width        int
+	height       int
+	stateMu      sync.Mutex // protects raw, oldState
+	raw          bool
+	oldState     *terminal.State
 }
 
 var ErrPromptInterrupted = errors.New("prompt interrupted")
@@ -36,31 +40,17 @@ func New() (*MinTerm, error) {
 	return m, nil
 }
 
-func (m *MinTerm) open() error {
-	f, err := os.OpenFile("/dev/tty", os.O_RDWR, 0)
-	if err != nil {
-		return err
-	}
-	m.tty = f
-	m.out = m.tty
-	m.in = m.tty
-	fd := int(m.tty.Fd())
-	w, h, err := terminal.GetSize(fd)
-	if err != nil {
-		return err
-	}
-	m.width, m.height = w, h
-	return nil
-}
-
 // Shutdown closes the terminal.
 func (m *MinTerm) Shutdown() error {
-	if m.tty == nil {
-		return nil
-	}
+	m.restore()
 	// this can hang waiting for newline, so do it in a goroutine.
 	// application shutting down, so will get closed by os anyway...
-	go m.tty.Close()
+	if m.termIn != nil {
+		go m.termIn.Close()
+	}
+	if m.termOut != nil && m.closeTermOut {
+		go m.termOut.Close()
+	}
 	return nil
 }
 
@@ -71,7 +61,7 @@ func (m *MinTerm) Size() (int, int) {
 
 // Write writes a string to the terminal.
 func (m *MinTerm) Write(s string) error {
-	_, err := fmt.Fprint(m.out, s)
+	_, err := fmt.Fprint(m.getReadWriter(), s)
 	return err
 }
 
@@ -79,16 +69,7 @@ func (m *MinTerm) Write(s string) error {
 // the prompt parameter first.
 func (m *MinTerm) Prompt(prompt string) (string, error) {
 	m.Write(prompt)
-	r := bufio.NewReader(m.in)
-	p, err := r.ReadString('\n')
-	if err != nil {
-		return "", err
-	}
-	// strip off the trailing newline
-	if len(p) > 0 {
-		p = p[:len(p)-1]
-	}
-	return p, nil
+	return m.readLine()
 }
 
 // PromptPassword gets a line of input from the terminal, but
@@ -98,12 +79,53 @@ func (m *MinTerm) PromptPassword(prompt string) (string, error) {
 	if !strings.HasSuffix(prompt, ": ") {
 		m.Write(": ")
 	}
-	b, err := gopass.GetPasswd()
+	return m.readSecret()
+}
+
+func (m *MinTerm) fdIn() int { return int(m.termIn.Fd()) }
+
+func (m *MinTerm) readLine() (string, error) {
+	m.makeRaw()
+	defer m.restore()
+	ret, err := terminal.NewTerminal(m.getReadWriter(), "").ReadLine()
+	return ret, convertErr(err)
+}
+
+func (m *MinTerm) readSecret() (string, error) {
+	m.makeRaw()
+	defer m.restore()
+	ret, err := terminal.NewTerminal(m.getReadWriter(), "").ReadPassword("")
+	return ret, convertErr(err)
+}
+
+func (m *MinTerm) makeRaw() error {
+	m.stateMu.Lock()
+	defer m.stateMu.Unlock()
+	fd := int(m.fdIn())
+	oldState, err := terminal.MakeRaw(fd)
 	if err != nil {
-		if err == gopass.ErrInterrupted {
-			err = ErrPromptInterrupted
-		}
-		return "", err
+		return err
 	}
-	return string(b), nil
+	m.raw = true
+	m.oldState = oldState
+	return nil
+}
+
+func (m *MinTerm) restore() {
+	m.stateMu.Lock()
+	defer m.stateMu.Unlock()
+	if !m.raw {
+		return
+	}
+	fd := int(m.fdIn())
+	terminal.Restore(fd, m.oldState)
+	m.raw = false
+	m.oldState = nil
+}
+
+func convertErr(e error) error {
+	if e == io.ErrUnexpectedEOF {
+		e = ErrPromptInterrupted
+	}
+	return e
 }

@@ -1,28 +1,14 @@
+// Copyright 2015 Keybase, Inc. All rights reserved. Use of
+// this source code is governed by the included BSD license.
+
 package client
 
-import (
-	"github.com/keybase/client/go/libkb"
-	keybase1 "github.com/keybase/client/protocol/go"
-)
+import "fmt"
 
 type NoTerminalError struct{}
 
 func (e NoTerminalError) Error() string {
 	return "No Terminal available"
-}
-
-type InputCanceledError struct{}
-
-func (e InputCanceledError) Error() string {
-	return "Input canceled"
-}
-
-func (e InputCanceledError) ToStatus() keybase1.Status {
-	return keybase1.Status{
-		Code: libkb.SCCanceled,
-		Name: "CANCELED",
-		Desc: "Input canceled",
-	}
 }
 
 type NotConfirmedError struct{}
@@ -77,4 +63,10 @@ type ProofNotYetAvailableError struct{}
 
 func (e ProofNotYetAvailableError) Error() string {
 	return "Proof wasn't available; we'll keep trying"
+}
+
+type UnexpectedArgsError string
+
+func (e UnexpectedArgsError) Error() string {
+	return fmt.Sprintf("Command `%s` doesn't take any non-flag arguments", string(e))
 }

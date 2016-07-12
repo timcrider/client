@@ -1,3 +1,6 @@
+// Copyright 2015 Keybase, Inc. All rights reserved. Use of
+// this source code is governed by the included BSD license.
+
 package libkb
 
 import (
@@ -8,7 +11,7 @@ import (
 	"strings"
 	"sync"
 
-	keybase1 "github.com/keybase/client/protocol/go"
+	keybase1 "github.com/keybase/client/go/protocol"
 	jsonw "github.com/keybase/go-jsonw"
 )
 
@@ -46,6 +49,8 @@ func (h1 NodeHashLong) Check(s string) bool {
 }
 
 type MerkleClient struct {
+	Contextified
+
 	keyring *SpecialKeyRing
 
 	// Blocks that have been verified
@@ -59,6 +64,7 @@ type MerkleClient struct {
 }
 
 type MerkleRoot struct {
+	Contextified
 	seqno             Seqno
 	pgpFingerprint    PGPFingerprint
 	sigs              *jsonw.Wrapper
@@ -87,12 +93,14 @@ type MerkleUserLeaf struct {
 type PathSteps []*PathStep
 
 type VerificationPath struct {
-	uid       keybase1.UID
-	root      *MerkleRoot
-	path      PathSteps
-	uidPath   PathSteps
-	idVersion int64
-	username  string
+	Contextified
+	uid           keybase1.UID
+	root          *MerkleRoot
+	path          PathSteps
+	uidPath       PathSteps
+	idVersion     int64
+	username      string
+	usernameCased string
 }
 
 type PathStep struct {
@@ -140,9 +148,10 @@ func GetNodeHashVoid(w *jsonw.Wrapper, nhp *NodeHash, errp *error) {
 
 func NewMerkleClient(g *GlobalContext) *MerkleClient {
 	return &MerkleClient{
-		keyring:  NewSpecialKeyRing(g.Env.GetMerkleKIDs()),
-		verified: make(map[Seqno]bool),
-		lastRoot: nil,
+		keyring:      NewSpecialKeyRing(g.Env.GetMerkleKIDs(), g),
+		verified:     make(map[Seqno]bool),
+		lastRoot:     nil,
+		Contextified: NewContextified(g),
 	}
 }
 
@@ -158,28 +167,28 @@ func merkleHeadKey() DbKey {
 }
 
 func (mc *MerkleClient) LoadRoot() error {
-	G.Log.Debug("+ MerkleClient.LoadRoot()")
-	curr, err := G.LocalDb.Lookup(merkleHeadKey())
+	mc.G().Log.Debug("+ MerkleClient.LoadRoot()")
+	curr, err := mc.G().LocalDb.Lookup(merkleHeadKey())
 	if err != nil {
 		return err
 	}
 	if curr == nil {
-		G.Log.Debug("- MerkleClient.LoadRoot() -> nil")
+		mc.G().Log.Debug("- MerkleClient.LoadRoot() -> nil")
 		return nil
 	}
-	mr, err := NewMerkleRootFromJSON(curr)
+	mr, err := NewMerkleRootFromJSON(curr, mc.G())
 	if err != nil {
 		return err
 	}
 	mc.Lock()
 	mc.lastRoot = mr
-	G.Log.Debug("- MerkleClient.LoadRoot() -> %d", mc.lastRoot.seqno)
+	mc.G().Log.Debug("- MerkleClient.LoadRoot() -> %v", mc.lastRoot)
 	mc.Unlock()
 	return nil
 }
 
 func (mr *MerkleRoot) Store() error {
-	err := G.LocalDb.Put(DbKey{
+	err := mr.G().LocalDb.Put(DbKey{
 		Typ: DBMerkleRoot,
 		Key: fmt.Sprintf("%d", mr.seqno),
 	},
@@ -196,7 +205,7 @@ func (mr *MerkleRoot) ToJSON() (jw *jsonw.Wrapper) {
 	return ret
 }
 
-func NewMerkleRootFromJSON(jw *jsonw.Wrapper) (ret *MerkleRoot, err error) {
+func NewMerkleRootFromJSON(jw *jsonw.Wrapper, g *GlobalContext) (ret *MerkleRoot, err error) {
 	var seqno int64
 	var sigs *jsonw.Wrapper
 	var payloadJSONString string
@@ -236,6 +245,7 @@ func NewMerkleRootFromJSON(jw *jsonw.Wrapper) (ret *MerkleRoot, err error) {
 		rootHash:          rh,
 		legacyUIDRootHash: lurh,
 		ctime:             ctime,
+		Contextified:      NewContextified(g),
 	}
 	return
 }
@@ -270,17 +280,18 @@ func (mc *MerkleClient) LookupPath(q HTTPArgs) (vp *VerificationPath, err error)
 	// Poll for 10s and ask for a race-free state.
 	q.Add("poll", I{10})
 
-	res, err := G.API.Get(APIArg{
-		Endpoint:    "merkle/path",
-		NeedSession: false,
-		Args:        q,
+	res, err := mc.G().API.Get(APIArg{
+		Endpoint:     "merkle/path",
+		NeedSession:  false,
+		Args:         q,
+		Contextified: NewContextified(mc.G()),
 	})
 
 	if err != nil {
 		return
 	}
 
-	root, err := NewMerkleRootFromJSON(res.Body.AtKey("root"))
+	root, err := NewMerkleRootFromJSON(res.Body.AtKey("root"), mc.G())
 	if err != nil {
 		return
 	}
@@ -312,8 +323,18 @@ func (mc *MerkleClient) LookupPath(q HTTPArgs) (vp *VerificationPath, err error)
 	if err != nil {
 		return
 	}
+	usernameCased, _ := res.Body.AtKey("username_cased").GetString()
 
-	vp = &VerificationPath{uid, root, pathOut, uidPathOut, idv, username}
+	vp = &VerificationPath{
+		uid:           uid,
+		root:          root,
+		path:          pathOut,
+		uidPath:       uidPathOut,
+		idVersion:     idv,
+		username:      username,
+		usernameCased: usernameCased,
+		Contextified:  NewContextified(mc.G()),
+	}
 	return
 }
 
@@ -369,7 +390,7 @@ func (mc *MerkleClient) VerifyRoot(root *MerkleRoot) error {
 			q, root.seqno)
 	}
 
-	G.Log.Debug("| Merkle root: got back %d, >= cached %d", int(root.seqno), int(q))
+	mc.G().Log.Debug("| Merkle root: got back %d, >= cached %d", int(root.seqno), int(q))
 
 	mc.Lock()
 	defer mc.Unlock()
@@ -384,14 +405,14 @@ func (mc *MerkleClient) VerifyRoot(root *MerkleRoot) error {
 	if err != nil {
 		return err
 	}
-	G.Log.Debug("+ Merkle: using KID=%s for verifying server sig", kid)
+	mc.G().Log.Debug("+ Merkle: using KID=%s for verifying server sig", kid)
 
 	key, err := mc.keyring.Load(kid)
 	if err != nil {
 		return err
 	}
 
-	G.Log.Debug("- Merkle: server sig verified")
+	mc.G().Log.Debug("- Merkle: server sig verified")
 
 	if key == nil {
 		return MerkleClientError{"no known verifying key"}
@@ -404,7 +425,7 @@ func (mc *MerkleClient) VerifyRoot(root *MerkleRoot) error {
 	}
 
 	if e2 := root.Store(); e2 != nil {
-		G.Log.Errorf("Cannot commit Merkle root to local DB: %s", e2)
+		mc.G().Log.Errorf("Cannot commit Merkle root to local DB: %s", e2)
 	}
 
 	mc.verified[root.seqno] = true
@@ -495,11 +516,11 @@ func parseV2(jw *jsonw.Wrapper) (*MerkleUserLeaf, error) {
 	return &user, nil
 }
 
-func ParseMerkleUserLeaf(jw *jsonw.Wrapper) (user *MerkleUserLeaf, err error) {
-	G.Log.Debug("+ ParsingMerkleUserLeaf")
+func parseMerkleUserLeaf(jw *jsonw.Wrapper, g *GlobalContext) (user *MerkleUserLeaf, err error) {
+	g.Log.Debug("+ ParsingMerkleUserLeaf")
 
 	if jw == nil {
-		G.Log.Debug("| empty leaf found; user wasn't in tree")
+		g.Log.Debug("| empty leaf found; user wasn't in tree")
 		user = &MerkleUserLeaf{}
 		return
 	}
@@ -533,16 +554,28 @@ func ParseMerkleUserLeaf(jw *jsonw.Wrapper) (user *MerkleUserLeaf, err error) {
 		err = fmt.Errorf("Unexpected version: %d", v)
 	}
 
-	G.Log.Debug("- ParsingMerkleUserLeaf -> %v", ErrToOk(err))
+	g.Log.Debug("- ParsingMerkleUserLeaf -> %v", ErrToOk(err))
 	return
 }
 
 func (vp *VerificationPath) VerifyUsername() (username string, err error) {
 	if CheckUIDAgainstUsername(vp.uid, vp.username) == nil {
-		G.Log.Debug("| Username %s mapped to %s via direct hash", vp.username, vp.uid)
+		vp.G().Log.Debug("| Username %s mapped to %s via direct hash", vp.username, vp.uid)
 		username = vp.username
 		return
 	}
+
+	vp.G().Log.Debug("| Failed to map Username %s -> UID %s via direct hash", vp.username, vp.uid)
+
+	if vp.usernameCased != vp.username && strings.ToLower(vp.usernameCased) == vp.username {
+		vp.G().Log.Debug("| Checking cased username difference: %s v %s", vp.username, vp.usernameCased)
+		if CheckUIDAgainstCasedUsername(vp.uid, vp.usernameCased) == nil {
+			vp.G().Log.Debug("| Username %s mapped to %s via direct hash (w/ username casing)", vp.usernameCased, vp.uid)
+			username = vp.username
+			return
+		}
+	}
+
 	hsh := sha256.Sum256([]byte(strings.ToLower(vp.username)))
 	hshS := hex.EncodeToString(hsh[:])
 	var leaf *jsonw.Wrapper
@@ -565,7 +598,7 @@ func (vp *VerificationPath) VerifyUsername() (username string, err error) {
 		return
 	}
 
-	G.Log.Debug("| Username %s mapped to %s via Merkle lookup", vp.username, vp.uid)
+	vp.G().Log.Debug("| Username %s mapped to %s via Merkle lookup", vp.username, vp.uid)
 	username = vp.username
 
 	return
@@ -587,12 +620,12 @@ func (vp *VerificationPath) VerifyUser() (user *MerkleUserLeaf, err error) {
 	if err == nil {
 		// noop
 	} else if _, ok := err.(MerkleNotFoundError); ok {
-		G.Log.Debug(fmt.Sprintf("In checking Merkle tree: %s", err))
+		vp.G().Log.Debug(fmt.Sprintf("In checking Merkle tree: %s", err))
 	} else {
 		return
 	}
 
-	user, err = ParseMerkleUserLeaf(leaf)
+	user, err = parseMerkleUserLeaf(leaf, vp.G())
 	if user != nil {
 		user.uid = vp.uid
 	}
@@ -602,7 +635,6 @@ func (vp *VerificationPath) VerifyUser() (user *MerkleUserLeaf, err error) {
 func (path PathSteps) VerifyPath(curr NodeHash, uidS string) (juser *jsonw.Wrapper, err error) {
 
 	bpath := uidS
-	pos := 0
 	lastTyp := 0
 
 	for i, step := range path {
@@ -620,14 +652,10 @@ func (path PathSteps) VerifyPath(curr NodeHash, uidS string) (juser *jsonw.Wrapp
 		}
 
 		plen := len(step.prefix)
-
-		epos := pos + plen
-		if bpath[pos:epos] != step.prefix {
-			err = fmt.Errorf("Path mismatch at level %d: %s != %s",
-				i, bpath[pos:epos], step.prefix)
+		if plen > 0 && bpath[:plen] != step.prefix {
+			err = fmt.Errorf("Path mismatch at level %d: %s != %s", i, bpath[:plen], step.prefix)
 			break
 		}
-		pos = epos
 
 		lastTyp, err = jw.AtKey("type").GetInt()
 		if err != nil {
@@ -659,7 +687,7 @@ func (path PathSteps) VerifyPath(curr NodeHash, uidS string) (juser *jsonw.Wrapp
 
 func (mc *MerkleClient) LookupUser(q HTTPArgs) (u *MerkleUserLeaf, err error) {
 
-	G.Log.Debug("+ MerkleClient.LookupUser(%v)", q)
+	mc.G().Log.Debug("+ MerkleClient.LookupUser(%v)", q)
 
 	var path *VerificationPath
 
@@ -667,29 +695,29 @@ func (mc *MerkleClient) LookupUser(q HTTPArgs) (u *MerkleUserLeaf, err error) {
 		return
 	}
 
-	G.Log.Debug("| LookupPath")
+	mc.G().Log.Debug("| LookupPath")
 	if path, err = mc.LookupPath(q); err != nil {
 		return
 	}
 
-	G.Log.Debug("| VerifyRoot")
+	mc.G().Log.Debug("| VerifyRoot")
 	if err = mc.VerifyRoot(path.root); err != nil {
 		return
 	}
 
-	G.Log.Debug("| VerifyUser")
+	mc.G().Log.Debug("| VerifyUser")
 	if u, err = path.VerifyUser(); err != nil {
 		return
 	}
 
-	G.Log.Debug("| VerifyUsername")
+	mc.G().Log.Debug("| VerifyUsername")
 	if u.username, err = path.VerifyUsername(); err != nil {
 		return
 	}
 
 	u.idVersion = path.idVersion
 
-	G.Log.Debug("- MerkleClient.LookupUser(%v) -> OK", q)
+	mc.G().Log.Debug("- MerkleClient.LookupUser(%v) -> OK", q)
 	return
 }
 
@@ -707,19 +735,21 @@ func (mc *MerkleClient) LastRootToSigJSON() (ret *jsonw.Wrapper, err error) {
 	// Lazy-init, only when needed.
 	if err = mc.Init(); err == nil {
 		mc.RLock()
-		ret = mc.lastRoot.ToSigJSON()
+		if mc.lastRoot != nil {
+			ret = mc.lastRoot.ToSigJSON()
+		}
 		mc.RUnlock()
 	}
 	return
 }
 
-func (mul *MerkleUserLeaf) MatchUser(u *User, uid keybase1.UID, un string) (err error) {
+func (mul *MerkleUserLeaf) MatchUser(u *User, uid keybase1.UID, nun NormalizedUsername) (err error) {
 	if mul.username != u.GetName() {
 		err = MerkleClashError{fmt.Sprintf("vs loaded object: username %s != %s", mul.username, u.GetName())}
 	} else if mul.uid.NotEqual(u.GetUID()) {
 		err = MerkleClientError{fmt.Sprintf("vs loaded object: UID %s != %s", mul.uid, u.GetUID())}
-	} else if len(un) > 0 && mul.username != un {
-		err = MerkleClashError{fmt.Sprintf("vs given arg: username %s != %s", mul.username, un)}
+	} else if !nun.IsNil() && !NewNormalizedUsername(mul.username).Eq(nun) {
+		err = MerkleClashError{fmt.Sprintf("vs given arg: username %s != %s", mul.username, nun)}
 	} else if uid.NotEqual(mul.uid) {
 		err = MerkleClashError{fmt.Sprintf("vs given arg: UID %s != %s", uid, mul.uid)}
 	}

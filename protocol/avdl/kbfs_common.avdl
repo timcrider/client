@@ -1,0 +1,43 @@
+@namespace("keybase.1")
+
+protocol kbfsCommon {
+  enum FSStatusCode {
+    START_0,
+    FINISH_1,
+    ERROR_2
+  }
+
+  enum FSNotificationType {
+    ENCRYPTING_0,
+    DECRYPTING_1,
+    SIGNING_2,
+    VERIFYING_3,
+    REKEYING_4,
+    CONNECTION_5,
+    MD_READ_SUCCESS_6
+  }
+
+  enum FSErrorType {
+    ACCESS_DENIED_0,
+    USER_NOT_FOUND_1,
+    REVOKED_DATA_DETECTED_2,
+    NOT_LOGGED_IN_3,
+    TIMEOUT_4,
+    REKEY_NEEDED_5,
+    BAD_FOLDER_6,
+    NOT_IMPLEMENTED_7,
+    OLD_VERSION_8,
+    OVER_QUOTA_9
+  }
+
+  record FSNotification {
+    boolean publicTopLevelFolder;
+    string filename;
+    string status;
+    FSStatusCode statusCode;
+    FSNotificationType notificationType;
+    FSErrorType errorType;
+    map<string> params;
+  }
+
+}

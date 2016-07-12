@@ -1,3 +1,6 @@
+// Copyright 2015 Keybase, Inc. All rights reserved. Use of
+// this source code is governed by the included BSD license.
+
 // PaperKeyPrimary creates the initial paper backup key for a user.  It
 // differs from the PaperKey engine in that it already knows the
 // signing key and it doesn't offer to revoke any devices, plus it
@@ -6,7 +9,8 @@ package engine
 
 import (
 	"github.com/keybase/client/go/libkb"
-	keybase1 "github.com/keybase/client/protocol/go"
+	keybase1 "github.com/keybase/client/go/protocol"
+	"golang.org/x/net/context"
 )
 
 // PaperKeyPrimary is an engine.
@@ -50,7 +54,7 @@ func (e *PaperKeyPrimary) RequiredUIs() []libkb.UIKind {
 
 // SubConsumers returns the other UI consumers for this engine.
 func (e *PaperKeyPrimary) SubConsumers() []libkb.UIConsumer {
-	return nil
+	return []libkb.UIConsumer{&PaperKeyGen{}}
 }
 
 // Run starts the engine.
@@ -71,5 +75,12 @@ func (e *PaperKeyPrimary) Run(ctx *Context) error {
 		return err
 	}
 
-	return ctx.LoginUI.DisplayPrimaryPaperKey(keybase1.DisplayPrimaryPaperKeyArg{Phrase: e.passphrase.String()})
+	// If they refuse to write down their key, don't kill the login flow, just print an
+	// ugly warning, which likely they won't see...
+	w := ctx.LoginUI.DisplayPrimaryPaperKey(context.TODO(), keybase1.DisplayPrimaryPaperKeyArg{Phrase: e.passphrase.String()})
+	if w != nil {
+		e.G().Log.Errorf("Display paper key failure: %s", w.Error())
+	}
+
+	return nil
 }

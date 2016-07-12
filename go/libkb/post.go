@@ -1,3 +1,6 @@
+// Copyright 2015 Keybase, Inc. All rights reserved. Use of
+// this source code is governed by the included BSD license.
+
 package libkb
 
 import (
@@ -5,7 +8,7 @@ import (
 	"fmt"
 	"runtime/debug"
 
-	keybase1 "github.com/keybase/client/protocol/go"
+	keybase1 "github.com/keybase/client/go/protocol"
 	jsonw "github.com/keybase/go-jsonw"
 )
 
@@ -170,7 +173,7 @@ func CheckPostedViaSigID(sigID keybase1.SigID) (found bool, status keybase1.Proo
 	return rfound, keybase1.ProofStatus(rstatus), rerr
 }
 
-func PostDeviceLKS(lctx LoginContext, deviceID keybase1.DeviceID, deviceType string, serverHalf []byte,
+func PostDeviceLKS(sr SessionReader, deviceID keybase1.DeviceID, deviceType string, serverHalf []byte,
 	ppGen PassphraseGeneration,
 	clientHalfRecovery string, clientHalfRecoveryKID keybase1.KID) error {
 	if len(serverHalf) == 0 {
@@ -191,10 +194,20 @@ func PostDeviceLKS(lctx LoginContext, deviceID keybase1.DeviceID, deviceType str
 			"lks_client_half": S{Val: clientHalfRecovery},
 			"kid":             S{Val: clientHalfRecoveryKID.String()},
 		},
-	}
-	if lctx != nil {
-		arg.SessionR = lctx.LocalSession()
+		SessionR: sr,
 	}
 	_, err := G.API.Post(arg)
+	return err
+}
+
+func CheckInvitationCode(code string) error {
+	arg := APIArg{
+		Endpoint:    "invitation/check",
+		NeedSession: false,
+		Args: HTTPArgs{
+			"invitation_id": S{Val: code},
+		},
+	}
+	_, err := G.API.Get(arg)
 	return err
 }

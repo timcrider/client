@@ -1,3 +1,6 @@
+// Copyright 2015 Keybase, Inc. All rights reserved. Use of
+// this source code is governed by the included BSD license.
+
 package engine
 
 //
@@ -7,10 +10,10 @@ package engine
 
 import (
 	"errors"
-	"os/exec"
 	"strings"
 
 	"github.com/keybase/client/go/libkb"
+	keybase1 "github.com/keybase/client/go/protocol"
 )
 
 type PGPKeyImportEngine struct {
@@ -23,30 +26,35 @@ type PGPKeyImportEngine struct {
 }
 
 type PGPKeyImportEngineArg struct {
-	Gen        *libkb.PGPGenArg
-	Pregen     *libkb.PGPKeyBundle
-	SigningKey libkb.GenericKey
-	Me         *libkb.User
-	Ctx        *libkb.GlobalContext
-	Lks        *libkb.LKSec
-	NoSave     bool
-	PushSecret bool
-	OnlySave   bool
-	AllowMulti bool
-	DoExport   bool
-	DoUnlock   bool
+	Gen              *libkb.PGPGenArg
+	Pregen           *libkb.PGPKeyBundle
+	SigningKey       libkb.GenericKey
+	Me               *libkb.User
+	Ctx              *libkb.GlobalContext
+	Lks              *libkb.LKSec
+	NoSave           bool
+	PushSecret       bool
+	OnlySave         bool
+	AllowMulti       bool
+	DoExport         bool
+	DoUnlock         bool
+	GPGFallback      bool
+	PreloadTsec      libkb.Triplesec
+	PreloadStreamGen libkb.PassphraseGeneration
 }
 
 func NewPGPKeyImportEngineFromBytes(key []byte, pushPrivate bool, gc *libkb.GlobalContext) (eng *PGPKeyImportEngine, err error) {
 	var bundle *libkb.PGPKeyBundle
+	var w *libkb.Warnings
 	if libkb.IsArmored(key) {
-		bundle, err = libkb.ReadPrivateKeyFromString(string(key))
+		bundle, w, err = libkb.ReadPrivateKeyFromString(string(key))
 	} else {
-		bundle, err = libkb.ReadOneKeyFromBytes(key)
+		bundle, w, err = libkb.ReadOneKeyFromBytes(key)
 	}
 	if err != nil {
 		return
 	}
+	w.Warn(gc)
 	arg := PGPKeyImportEngineArg{
 		Pregen:     bundle,
 		PushSecret: pushPrivate,
@@ -87,7 +95,7 @@ func (e *PGPKeyImportEngine) generateKey(ctx *Context) (err error) {
 	if err = gen.CreatePGPIDs(); err != nil {
 		return
 	}
-	e.bundle, err = libkb.GeneratePGPKeyBundle(*gen, ctx.LogUI)
+	e.bundle, err = libkb.GeneratePGPKeyBundle(e.G(), *gen, ctx.LogUI)
 	return
 }
 
@@ -99,12 +107,12 @@ func (e *PGPKeyImportEngine) saveLKS(ctx *Context) (err error) {
 
 	lks := e.arg.Lks
 	if lks == nil {
-		lks, err = libkb.NewLKSForEncrypt(ctx.SecretUI, e.me.GetUID(), e.G())
+		lks, err = libkb.NewLKSecForEncrypt(ctx.SecretUI, e.me.GetUID(), e.G())
 		if err != nil {
 			return err
 		}
 	}
-	_, err = libkb.WriteLksSKBToKeyring(e.bundle, lks, ctx.LogUI, ctx.LoginContext)
+	_, err = libkb.WriteLksSKBToKeyring(e.G(), e.bundle, lks, ctx.LoginContext)
 	return
 }
 
@@ -218,14 +226,20 @@ func (e *PGPKeyImportEngine) exportToGPG(ctx *Context) (err error) {
 	}
 	gpg := e.G().GetGpgClient()
 
-	if _, err := gpg.Configure(); err != nil {
-		if err == exec.ErrNotFound {
-			e.G().Log.Debug("Not saving new key to GPG since no gpg install was found")
-			err = nil
-		}
-		return err
+	ok, err := gpg.CanExec()
+	if err != nil {
+		e.G().Log.Debug("Not saving new key to GPG. Error in gpg.CanExec(): %s", err)
+		// libkb/util_*.go:canExec() can return generic errors, just ignore them
+		// in this situation since export to gpg is on by default in the client
+		// pgp gen command.
+		return nil
 	}
-	err = gpg.ExportKey(*e.bundle)
+	if !ok {
+		e.G().Log.Debug("Not saving new key to GPG since no gpg install was found")
+		return nil
+	}
+
+	err = gpg.ExportKey(*e.bundle, true /* export private key */)
 	if err == nil {
 		ctx.LogUI.Info("Exported new key to the local GPG keychain")
 	}
@@ -253,6 +267,7 @@ func (e *PGPKeyImportEngine) loadDelegator(ctx *Context) (err error) {
 		Me:             e.me,
 		Expire:         libkb.KeyExpireIn,
 		DelegationType: libkb.SibkeyType,
+		Contextified:   libkb.NewContextified(e.G()),
 	}
 
 	return e.del.LoadSigningKey(ctx.LoginContext, ctx.SecretUI)
@@ -292,10 +307,19 @@ func (e *PGPKeyImportEngine) generate(ctx *Context) (err error) {
 }
 
 func (e *PGPKeyImportEngine) prepareSecretPush(ctx *Context) error {
-	tsec, gen, err := e.G().LoginState().GetVerifiedTriplesec(ctx.SecretUI)
-	if err != nil {
-		return err
+	var tsec libkb.Triplesec
+	var gen libkb.PassphraseGeneration
+	if e.arg.PreloadTsec != nil && e.arg.PreloadStreamGen > 0 {
+		tsec = e.arg.PreloadTsec
+		gen = e.arg.PreloadStreamGen
+	} else {
+		var err error
+		tsec, gen, err = e.G().LoginState().GetVerifiedTriplesec(ctx.SecretUI)
+		if err != nil {
+			return err
+		}
 	}
+
 	skb, err := e.bundle.ToServerSKB(e.G(), tsec, gen)
 	if err != nil {
 		return err
@@ -307,6 +331,9 @@ func (e *PGPKeyImportEngine) prepareSecretPush(ctx *Context) error {
 
 func (e *PGPKeyImportEngine) push(ctx *Context) (err error) {
 	e.G().Log.Debug("+ PGP::Push")
+	if e.arg.GPGFallback {
+		e.bundle.InitGPGKey()
+	}
 	e.del.NewKey = e.bundle
 	e.del.EncodedPrivateKey = e.epk
 	if err = e.del.Run(ctx.LoginContext); err != nil {
@@ -331,4 +358,11 @@ func PGPCheckMulti(me *libkb.User, allowMulti bool) (err error) {
 		err = libkb.KeyExistsError{Key: pgps[0].GetFingerprintP()}
 	}
 	return
+}
+
+func (e *PGPKeyImportEngine) GetKID() (kid keybase1.KID) {
+	if e.bundle == nil {
+		return kid
+	}
+	return e.bundle.GetKID()
 }

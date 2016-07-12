@@ -1,19 +1,25 @@
+// Copyright 2015 Keybase, Inc. All rights reserved. Use of
+// this source code is governed by the included BSD license.
+
 package client
 
 import (
 	"fmt"
 
+	"golang.org/x/net/context"
+
 	"github.com/keybase/cli"
-	"github.com/keybase/client/go/engine"
 	"github.com/keybase/client/go/libcmdline"
 	"github.com/keybase/client/go/libkb"
-	keybase1 "github.com/keybase/client/protocol/go"
-	"github.com/maxtaco/go-framed-msgpack-rpc/rpc2"
+	keybase1 "github.com/keybase/client/go/protocol"
+	rpc "github.com/keybase/go-framed-msgpack-rpc"
 )
 
 type CmdID struct {
+	libkb.Contextified
 	user           string
-	trackStatement bool
+	useDelegateUI  bool
+	skipProofCache bool
 }
 
 func (v *CmdID) ParseArgv(ctx *cli.Context) error {
@@ -25,58 +31,86 @@ func (v *CmdID) ParseArgv(ctx *cli.Context) error {
 	if nargs == 1 {
 		v.user = ctx.Args()[0]
 	}
-	v.trackStatement = ctx.Bool("track-statement")
+	v.useDelegateUI = ctx.Bool("ui")
+	v.skipProofCache = ctx.Bool("skip-proof-cache")
 	return nil
 }
 
-func (v *CmdID) makeArg() *engine.IDEngineArg {
-	return &engine.IDEngineArg{
-		UserAssertion:  v.user,
-		TrackStatement: v.trackStatement,
+func (v *CmdID) makeArg() keybase1.Identify2Arg {
+	return keybase1.Identify2Arg{
+		UserAssertion:    v.user,
+		UseDelegateUI:    v.useDelegateUI,
+		Reason:           keybase1.IdentifyReason{Reason: "CLI id command"},
+		ForceRemoteCheck: v.skipProofCache,
+		AlwaysBlock:      true,
+		NeedProofSet:     true,
+		AllowEmptySelfID: true,
+		NoSkipSelf:       true,
 	}
 }
 
 func (v *CmdID) Run() error {
 	var cli keybase1.IdentifyClient
-	protocols := []rpc2.Protocol{
-		NewLogUIProtocol(),
-		NewIdentifyUIProtocol(),
-	}
-	cli, err := GetIdentifyClient()
+	protocols := []rpc.Protocol{}
+
+	// always register this, even if ui is delegated, so that
+	// fallback to terminal UI works.
+	protocols = append(protocols, NewIdentifyUIProtocol(v.G()))
+	cli, err := GetIdentifyClient(v.G())
 	if err != nil {
 		return err
 	}
-	if err := RegisterProtocols(protocols); err != nil {
+	if err := RegisterProtocolsWithContext(protocols, v.G()); err != nil {
 		return err
 	}
 
 	arg := v.makeArg()
-	_, err = cli.Identify(arg.Export())
+	_, err = cli.Identify2(context.TODO(), arg)
 	if _, ok := err.(libkb.SelfNotFoundError); ok {
-		GlobUI.Println("Could not find UID or username for you on this device.")
-		GlobUI.Println("You can either specify a user to id:  keybase id <username>")
-		GlobUI.Println("Or log in once on this device and run `keybase id` again.")
+		msg := `Could not find UID or username for you on this device.
+You can either specify a user to id: keybase id <username>
+Or log in once on this device and run "keybase id" again.
+`
+		v.G().UI.GetDumbOutputUI().Printf(msg)
 		return nil
 	}
 	return err
 }
 
-func NewCmdID(cl *libcmdline.CommandLine) cli.Command {
-	return cli.Command{
+func NewCmdID(cl *libcmdline.CommandLine, g *libkb.GlobalContext) cli.Command {
+	ret := cli.Command{
 		Name:         "id",
 		ArgumentHelp: "[username]",
 		Usage:        "Identify a user and check their signature chain",
-		Description:  "Identify a user and check their signature chain.  Don't specify a username to identify yourself.  You can also specify proof assertions like user@twitter.",
+		Description:  "Identify a user and check their signature chain. Don't specify a username to identify yourself. You can also specify proof assertions like user@twitter.",
 		Flags: []cli.Flag{
 			cli.BoolFlag{
-				Name:  "t, track-statement",
-				Usage: "Output a tracking statement (in JSON format).",
+				Name:      "ui",
+				Usage:     "Use identify UI.",
+				HideUsage: !develUsage,
+			},
+			cli.BoolFlag{
+				Name:  "s, skip-proof-cache",
+				Usage: "Skip cached proofs, force re-check",
 			},
 		},
 		Action: func(c *cli.Context) {
-			cl.ChooseCommand(&CmdID{}, "id", c)
+			cl.ChooseCommand(NewCmdIDRunner(g), "id", c)
 		},
 	}
+	return ret
+}
+
+func NewCmdIDRunner(g *libkb.GlobalContext) *CmdID {
+	return &CmdID{Contextified: libkb.NewContextified(g)}
+}
+
+func (v *CmdID) SetUser(s string) {
+	v.user = s
+}
+
+func (v *CmdID) UseDelegateUI() {
+	v.useDelegateUI = true
 }
 
 func (v *CmdID) GetUsage() libkb.Usage {

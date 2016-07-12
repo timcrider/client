@@ -1,3 +1,6 @@
+// Copyright 2015 Keybase, Inc. All rights reserved. Use of
+// this source code is governed by the included BSD license.
+
 package libkb
 
 import (
@@ -8,7 +11,7 @@ import (
 	"testing"
 	"time"
 
-	keybase1 "github.com/keybase/client/protocol/go"
+	keybase1 "github.com/keybase/client/go/protocol"
 	jsonw "github.com/keybase/go-jsonw"
 	testvectors "github.com/keybase/keybase-test-vectors/go"
 )
@@ -94,7 +97,7 @@ type TestInput struct {
 }
 
 func TestAllChains(t *testing.T) {
-	tc := SetupTest(t, "test_all_chains")
+	tc := SetupTest(t, "test_all_chains", 1)
 	defer tc.Cleanup()
 
 	var testList TestList
@@ -142,7 +145,7 @@ func doChainTest(t *testing.T, testCase TestCase) {
 	// which case the eldest key is specified by name.
 	var eldestKID keybase1.KID
 	if testCase.Eldest == "" {
-		eldestKey, err := ParseGenericKey(input.Keys[0])
+		eldestKey, _, err := ParseGenericKey(input.Keys[0])
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -165,10 +168,10 @@ func doChainTest(t *testing.T, testCase TestCase) {
 	// code that's actually being tested.
 	var sigchainErr error
 	ckf := ComputedKeyFamily{kf: keyFamily}
-	sigchain := SigChain{username: NewNormalizedUsername(input.Username), uid: uid}
+	sigchain := SigChain{username: NewNormalizedUsername(input.Username), uid: uid, loadedFromLinkOne: true}
 	for i := 0; i < chainLen; i++ {
 		linkBlob := inputBlob.AtKey("chain").AtIndex(i)
-		link, err := ImportLinkFromServer(&sigchain, linkBlob, uid)
+		link, err := ImportLinkFromServer(nil, &sigchain, linkBlob, uid)
 		if err != nil {
 			sigchainErr = err
 			break
@@ -187,7 +190,7 @@ func doChainTest(t *testing.T, testCase TestCase) {
 		}
 		foundType := reflect.TypeOf(sigchainErr)
 		expectedTypes := getErrorTypesMap()[testCase.ErrType]
-		if expectedTypes == nil || len(expectedTypes) == 0 {
+		if len(expectedTypes) == 0 {
 			msg := "No Go error types defined for expected failure %s.\n" +
 				"This could be because of new test cases in github.com/keybase/keybase-test-vectors.\n" +
 				"Go error returned: %s"
@@ -215,7 +218,9 @@ func doChainTest(t *testing.T, testCase TestCase) {
 
 	// Check the expected results: total unrevoked links, sibkeys, and subkeys.
 	unrevokedCount := 0
-	idtable, err := NewIdentityTable(eldestKID, &sigchain, nil)
+
+	// XXX we should really contextify this
+	idtable, err := NewIdentityTable(nil, eldestKID, &sigchain, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -252,7 +257,7 @@ func createKeyFamily(bundles []string) (*KeyFamily, error) {
 	}
 	publicKeys := jsonw.NewDictionary()
 	publicKeys.SetKey("all_bundles", allKeys)
-	return ParseKeyFamily(publicKeys)
+	return ParseKeyFamily(G, publicKeys)
 }
 
 func getCurrentTimeForTest(sigChain SigChain, keyFamily *KeyFamily) time.Time {

@@ -1,3 +1,6 @@
+// Copyright 2015 Keybase, Inc. All rights reserved. Use of
+// this source code is governed by the included BSD license.
+
 package pinentry
 
 import (
@@ -9,7 +12,7 @@ import (
 	"strings"
 
 	"github.com/keybase/client/go/logger"
-	keybase1 "github.com/keybase/client/protocol/go"
+	keybase1 "github.com/keybase/client/go/protocol"
 )
 
 //
@@ -29,10 +32,11 @@ type Pinentry struct {
 	log     logger.Logger
 }
 
-func New(envprog string, log logger.Logger) *Pinentry {
+func New(envprog string, log logger.Logger, tty string) *Pinentry {
 	return &Pinentry{
 		prog: envprog,
 		log:  log,
+		tty:  tty,
 	}
 }
 
@@ -68,24 +72,6 @@ func (pe *Pinentry) FindProgram() (error, error) {
 		pe.path = prog
 	}
 	return err, fatalerr
-}
-
-func (pe *Pinentry) GetTerminalName() {
-	tty, err := os.Readlink("/proc/self/fd/0")
-	if err != nil {
-		pe.log.Debug("| Can't find terminal name via /proc lookup: %s", err)
-
-		// try /dev/tty
-		tty = "/dev/tty"
-		_, err = os.Stat("/dev/tty")
-		if err != nil {
-			pe.log.Debug("| stat /dev/tty failed: %s", err)
-			return
-		}
-	}
-
-	pe.log.Debug("| found tty=%s", tty)
-	pe.tty = tty
 }
 
 func (pe *Pinentry) Get(arg keybase1.SecretEntryArg) (res *keybase1.SecretEntryRes, err error) {
@@ -141,7 +127,6 @@ func (pi *pinentryInstance) Set(cmd, val string, errp *error) {
 }
 
 func (pi *pinentryInstance) Init() (err error) {
-
 	parent := pi.parent
 
 	parent.log.Debug("+ pinentryInstance::Init()")

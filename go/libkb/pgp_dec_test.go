@@ -1,3 +1,6 @@
+// Copyright 2015 Keybase, Inc. All rights reserved. Use of
+// this source code is governed by the included BSD license.
+
 package libkb
 
 import (
@@ -6,7 +9,7 @@ import (
 )
 
 func TestPGPDecryptBasic(t *testing.T) {
-	tc := SetupTest(t, "pgp_encrypt")
+	tc := SetupTest(t, "pgp_encrypt", 1)
 	defer tc.Cleanup()
 	keyA, err := tc.MakePGPKey("keya@keybase.io")
 	if err != nil {
@@ -25,7 +28,7 @@ func TestPGPDecryptBasic(t *testing.T) {
 	}
 
 	out := NewBufferCloser()
-	if _, err := PGPDecryptWithBundles(mid, out, recipients); err != nil {
+	if _, err := PGPDecryptWithBundles(G, mid, out, recipients); err != nil {
 		t.Fatal(err)
 	}
 

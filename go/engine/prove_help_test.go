@@ -1,10 +1,15 @@
+// Copyright 2015 Keybase, Inc. All rights reserved. Use of
+// this source code is governed by the included BSD license.
+
 package engine
 
 import (
 	"fmt"
 
+	"golang.org/x/net/context"
+
 	libkb "github.com/keybase/client/go/libkb"
-	keybase1 "github.com/keybase/client/protocol/go"
+	keybase1 "github.com/keybase/client/go/protocol"
 )
 
 type ProveUIMock struct {
@@ -13,30 +18,30 @@ type ProveUIMock struct {
 	hook                                           func(arg keybase1.OkToCheckArg) (bool, string, error)
 }
 
-func (p *ProveUIMock) PromptOverwrite(arg keybase1.PromptOverwriteArg) (bool, error) {
+func (p *ProveUIMock) PromptOverwrite(_ context.Context, arg keybase1.PromptOverwriteArg) (bool, error) {
 	p.overwrite = true
 	return true, nil
 }
 
-func (p *ProveUIMock) PromptUsername(arg keybase1.PromptUsernameArg) (string, error) {
+func (p *ProveUIMock) PromptUsername(_ context.Context, arg keybase1.PromptUsernameArg) (string, error) {
 	p.username = true
 	return "", nil
 }
 
-func (p *ProveUIMock) OutputPrechecks(arg keybase1.OutputPrechecksArg) error {
+func (p *ProveUIMock) OutputPrechecks(_ context.Context, arg keybase1.OutputPrechecksArg) error {
 	return nil
 }
 
-func (p *ProveUIMock) PreProofWarning(arg keybase1.PreProofWarningArg) (bool, error) {
+func (p *ProveUIMock) PreProofWarning(_ context.Context, arg keybase1.PreProofWarningArg) (bool, error) {
 	p.warning = true
 	return true, nil
 }
 
-func (p *ProveUIMock) OutputInstructions(arg keybase1.OutputInstructionsArg) error {
+func (p *ProveUIMock) OutputInstructions(_ context.Context, arg keybase1.OutputInstructionsArg) error {
 	return nil
 }
 
-func (p *ProveUIMock) OkToCheck(arg keybase1.OkToCheckArg) (bool, error) {
+func (p *ProveUIMock) OkToCheck(_ context.Context, arg keybase1.OkToCheckArg) (bool, error) {
 	if !p.checked {
 		p.checked = true
 		ok, postID, err := p.hook(arg)
@@ -46,7 +51,7 @@ func (p *ProveUIMock) OkToCheck(arg keybase1.OkToCheckArg) (bool, error) {
 	return false, fmt.Errorf("Check should have worked the first time!")
 }
 
-func (p *ProveUIMock) DisplayRecheckWarning(arg keybase1.DisplayRecheckWarningArg) error {
+func (p *ProveUIMock) DisplayRecheckWarning(_ context.Context, arg keybase1.DisplayRecheckWarningArg) error {
 	p.recheck = true
 	return nil
 }

@@ -1,17 +1,22 @@
+// Copyright 2015 Keybase, Inc. All rights reserved. Use of
+// this source code is governed by the included BSD license.
+
 package client
 
 import (
 	"fmt"
 
+	"golang.org/x/net/context"
+
 	"github.com/keybase/cli"
 	"github.com/keybase/client/go/libcmdline"
 	"github.com/keybase/client/go/libkb"
-	keybase1 "github.com/keybase/client/protocol/go"
-	"github.com/maxtaco/go-framed-msgpack-rpc/rpc2"
+	keybase1 "github.com/keybase/client/go/protocol"
+	rpc "github.com/keybase/go-framed-msgpack-rpc"
 )
 
 type CmdSigsRevoke struct {
-	sigIDs []keybase1.SigID
+	queries []string
 }
 
 func (c *CmdSigsRevoke) ParseArgv(ctx *cli.Context) error {
@@ -20,7 +25,10 @@ func (c *CmdSigsRevoke) ParseArgv(ctx *cli.Context) error {
 	}
 
 	for _, arg := range ctx.Args() {
-		c.sigIDs = append(c.sigIDs, keybase1.SigID(arg))
+		if len(arg) < keybase1.SigIDQueryMin {
+			return fmt.Errorf("sig id %q is too short; must be at least 16 characters long", arg)
+		}
+		c.queries = append(c.queries, arg)
 	}
 
 	return nil
@@ -32,24 +40,22 @@ func (c *CmdSigsRevoke) Run() error {
 		return err
 	}
 
-	protocols := []rpc2.Protocol{
-		NewLogUIProtocol(),
-		NewSecretUIProtocol(),
+	protocols := []rpc.Protocol{
+		NewSecretUIProtocol(G),
 	}
 	if err = RegisterProtocols(protocols); err != nil {
 		return err
 	}
 
-	return cli.RevokeSigs(keybase1.RevokeSigsArg{
-		SigIDs: c.sigIDs,
+	return cli.RevokeSigs(context.TODO(), keybase1.RevokeSigsArg{
+		SigIDQueries: c.queries,
 	})
 }
 
 func NewCmdSigsRevoke(cl *libcmdline.CommandLine) cli.Command {
 	return cli.Command{
 		Name:         "revoke",
-		ArgumentHelp: "<id>",
-		Description:  "Revoke signature",
+		ArgumentHelp: "<id> ...",
 		Action: func(c *cli.Context) {
 			cl.ChooseCommand(&CmdSigsRevoke{}, "revoke", c)
 		},

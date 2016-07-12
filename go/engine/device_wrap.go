@@ -1,8 +1,11 @@
+// Copyright 2015 Keybase, Inc. All rights reserved. Use of
+// this source code is governed by the included BSD license.
+
 package engine
 
 import (
 	"github.com/keybase/client/go/libkb"
-	keybase1 "github.com/keybase/client/protocol/go"
+	keybase1 "github.com/keybase/client/go/protocol"
 )
 
 // DeviceWrap is an engine that wraps DeviceRegister and
@@ -10,13 +13,15 @@ import (
 type DeviceWrap struct {
 	args *DeviceWrapArgs
 
-	signingKey libkb.GenericKey
+	signingKey    libkb.GenericKey
+	encryptionKey libkb.GenericKey
 	libkb.Contextified
 }
 
 type DeviceWrapArgs struct {
 	Me         *libkb.User
 	DeviceName string
+	DeviceType string
 	Lks        *libkb.LKSec
 	IsEldest   bool
 	Signer     libkb.GenericKey
@@ -72,6 +77,7 @@ func (e *DeviceWrap) Run(ctx *Context) error {
 		Me:         e.args.Me,
 		DeviceID:   deviceID,
 		DeviceName: e.args.DeviceName,
+		DeviceType: e.args.DeviceType,
 		Lks:        e.args.Lks,
 	}
 	kgEng := NewDeviceKeygen(kgArgs, e.G())
@@ -89,10 +95,21 @@ func (e *DeviceWrap) Run(ctx *Context) error {
 	}
 
 	e.signingKey = kgEng.SigningKey()
+	e.encryptionKey = kgEng.EncryptionKey()
+
+	if ctx.LoginContext != nil {
+		// cache the secret keys
+		ctx.LoginContext.SetCachedSecretKey(libkb.SecretKeyArg{KeyType: libkb.DeviceSigningKeyType}, e.signingKey)
+		ctx.LoginContext.SetCachedSecretKey(libkb.SecretKeyArg{KeyType: libkb.DeviceEncryptionKeyType}, e.encryptionKey)
+	}
 
 	return nil
 }
 
 func (e *DeviceWrap) SigningKey() libkb.GenericKey {
 	return e.signingKey
+}
+
+func (e *DeviceWrap) EncryptionKey() libkb.GenericKey {
+	return e.encryptionKey
 }

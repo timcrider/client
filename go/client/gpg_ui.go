@@ -1,23 +1,35 @@
+// Copyright 2015 Keybase, Inc. All rights reserved. Use of
+// this source code is governed by the included BSD license.
+
 package client
 
 import (
 	"fmt"
-	keybase1 "github.com/keybase/client/protocol/go"
-	"github.com/maxtaco/go-framed-msgpack-rpc/rpc2"
 	"strings"
 	"text/tabwriter"
+
+	"github.com/keybase/client/go/libkb"
+	"github.com/keybase/client/go/protocol"
+	rpc "github.com/keybase/go-framed-msgpack-rpc"
+	"golang.org/x/net/context"
 )
 
-func NewGPGUIProtocol() rpc2.Protocol {
-	return keybase1.GpgUiProtocol(GlobUI.GetGPGUI())
+func NewGPGUIProtocol(g *libkb.GlobalContext) rpc.Protocol {
+	return keybase1.GpgUiProtocol(g.UI.GetGPGUI())
 }
 
 type GPGUI struct {
-	parent   *UI
+	libkb.Contextified
+	parent   libkb.TerminalUI
 	noPrompt bool
+	tty      string
 }
 
-func (g GPGUI) SelectKeyID(keys []keybase1.GPGKey) (string, error) {
+func NewGPGUI(g *libkb.GlobalContext, t libkb.TerminalUI, np bool, tty string) GPGUI {
+	return GPGUI{Contextified: libkb.NewContextified(g), parent: t, noPrompt: np, tty: tty}
+}
+
+func (g GPGUI) SelectKeyID(_ context.Context, keys []keybase1.GPGKey) (string, error) {
 	w := new(tabwriter.Writer)
 	w.Init(g.parent.OutputWriter(), 5, 0, 3, ' ', 0)
 
@@ -32,7 +44,7 @@ func (g GPGUI) SelectKeyID(keys []keybase1.GPGKey) (string, error) {
 	}
 	w.Flush()
 
-	ret, err := g.parent.PromptSelectionOrCancel("Choose a key", 1, len(keys))
+	ret, err := PromptSelectionOrCancel(PromptDescriptorGPGSelectKey, g.parent, "Choose a key", 1, len(keys))
 	if err != nil {
 		if err == ErrInputCanceled {
 			return "", nil
@@ -42,8 +54,8 @@ func (g GPGUI) SelectKeyID(keys []keybase1.GPGKey) (string, error) {
 	return keys[ret-1].KeyID, nil
 }
 
-func (g GPGUI) SelectKeyAndPushOption(arg keybase1.SelectKeyAndPushOptionArg) (res keybase1.SelectKeyRes, err error) {
-	keyID, err := g.SelectKeyID(arg.Keys)
+func (g GPGUI) SelectKeyAndPushOption(ctx context.Context, arg keybase1.SelectKeyAndPushOptionArg) (res keybase1.SelectKeyRes, err error) {
+	keyID, err := g.SelectKeyID(ctx, arg.Keys)
 	if err != nil {
 		return res, err
 	}
@@ -51,13 +63,33 @@ func (g GPGUI) SelectKeyAndPushOption(arg keybase1.SelectKeyAndPushOptionArg) (r
 	return res, nil
 }
 
-func (g GPGUI) SelectKey(arg keybase1.SelectKeyArg) (string, error) {
-	return g.SelectKeyID(arg.Keys)
+func (g GPGUI) SelectKey(ctx context.Context, arg keybase1.SelectKeyArg) (string, error) {
+	return g.SelectKeyID(ctx, arg.Keys)
 }
 
-func (g GPGUI) WantToAddGPGKey(dummy int) (bool, error) {
+func (g GPGUI) WantToAddGPGKey(_ context.Context, _ int) (bool, error) {
 	if g.noPrompt {
 		return false, nil
 	}
-	return g.parent.PromptYesNo("Would you like to add one of your PGP keys to Keybase?", PromptDefaultYes)
+	return g.parent.PromptYesNo(PromptDescriptorGPGOKToAdd, "Would you like to add one of your PGP keys to Keybase?", libkb.PromptDefaultYes)
+}
+
+func (g GPGUI) ConfirmDuplicateKeyChosen(_ context.Context, _ int) (bool, error) {
+	if g.noPrompt {
+		return false, nil
+	}
+	return g.parent.PromptYesNo(PromptDescriptorGPGConfirmDuplicateKey, "You've already selected this public key for use on Keybase. Would you like to update it on Keybase?", libkb.PromptDefaultYes)
+}
+
+func (g GPGUI) Sign(_ context.Context, arg keybase1.SignArg) (string, error) {
+	fp, err := libkb.PGPFingerprintFromSlice(arg.Fingerprint)
+	if err != nil {
+		return "", err
+	}
+	cli := g.G().GetGpgClient()
+	if err := cli.Configure(); err != nil {
+		return "", err
+	}
+	cli.SetTTY(g.tty)
+	return cli.Sign(*fp, arg.Msg)
 }

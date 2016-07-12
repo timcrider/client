@@ -1,0 +1,21 @@
+/* @flow */
+import type {Component} from 'react'
+
+export type Props = {
+  users: Array<string>,
+  onForgotPassphrase: () => void,
+  onSignup: () => void,
+  onSomeoneElse: () => void,
+  error: ?string,
+  waitingForResponse: boolean,
+  showTyping: boolean,
+  saveInKeychain: boolean,
+  selectedUser: ?string,
+  selectedUserChange: (selectedUser: string) => void,
+  passphraseChange: (passphrase: string) => void,
+  showTypingChange: (typingChange: boolean) => void,
+  saveInKeychainChange: (saveInKeychain: boolean) => void,
+  onSubmit: () => void
+}
+
+export default class LoginRender extends React$Component<void, Props, void> { }

@@ -1,21 +1,26 @@
+// Copyright 2015 Keybase, Inc. All rights reserved. Use of
+// this source code is governed by the included BSD license.
+
 package engine
 
 import (
 	"fmt"
+	"sync"
 
 	"github.com/keybase/client/go/libkb"
-	keybase1 "github.com/keybase/client/protocol/go"
+	keybase1 "github.com/keybase/client/go/protocol"
 )
 
 // Identify is an engine to identify a user.
 type Identify struct {
-	arg        *IdentifyArg
-	user       *libkb.User
-	me         *libkb.User
-	userExpr   libkb.AssertionExpression
-	outcome    *libkb.IdentifyOutcome
-	trackInst  *libkb.TrackInstructions
-	trackToken libkb.IdentifyCacheToken
+	arg              *IdentifyArg
+	user             *libkb.User
+	me               *libkb.User
+	userExpr         libkb.AssertionExpression
+	outcome          *libkb.IdentifyOutcome
+	trackInst        *libkb.TrackInstructions
+	trackToken       keybase1.TrackToken
+	selfShortCircuit bool
 	libkb.Contextified
 }
 
@@ -29,6 +34,9 @@ type IdentifyArg struct {
 	// These options are sent to the ui based on command line options.
 	// For normal identify, safe to leave these in their default zero state.
 	TrackOptions keybase1.TrackOptions
+
+	Source keybase1.ClientType
+	Reason keybase1.IdentifyReason
 }
 
 func NewIdentifyArg(targetUsername string, withTracking, forceRemoteCheck bool) *IdentifyArg {
@@ -70,7 +78,7 @@ func (e *Identify) Name() string {
 // GetPrereqs returns the engine prereqs.
 func (e *Identify) Prereqs() Prereqs {
 	// if WithTracking is on, we need to be logged in
-	return Prereqs{Session: e.arg.WithTracking}
+	return Prereqs{Device: e.arg.WithTracking}
 }
 
 // RequiredUIs returns the required UIs.
@@ -91,24 +99,28 @@ func (e *Identify) Run(ctx *Context) error {
 		return err
 	}
 
-	ok, err := IsLoggedIn(e, ctx)
+	ok, uid, err := IsLoggedIn(e, ctx)
 	if err != nil {
 		return err
 	}
 	if ok {
-		e.me, err = libkb.LoadMe(libkb.NewLoadUserArg(e.G()))
+		e.me, err = libkb.LoadMeByUID(e.G(), uid)
 		if err != nil {
 			return err
 		}
 
 		if e.user.Equal(e.me) {
 			e.arg.WithTracking = false
+			if e.arg.Source == keybase1.ClientType_KBFS {
+				// if this is a self identify from kbfs, then short-circuit the identify process:
+				return e.shortCircuitSelfID(ctx)
+			}
 		} else {
 			e.arg.WithTracking = true
 		}
 	}
 
-	ctx.IdentifyUI.Start(e.user.GetName())
+	ctx.IdentifyUI.Start(e.user.GetName(), e.arg.Reason)
 
 	e.outcome, err = e.run(ctx)
 	if err != nil {
@@ -119,12 +131,12 @@ func (e *Identify) Run(ctx *Context) error {
 	// inform the ui what to do with the remote tracking prompt:
 	e.outcome.TrackOptions = e.arg.TrackOptions
 
-	e.G().Log.Debug("inserting identify outcome for %q in IdentifyCache", e.user.GetName())
-	key, err := e.G().IdentifyCache.Insert(e.outcome)
+	e.G().Log.Debug("inserting identify outcome for %q in TrackCache", e.user.GetName())
+	key, err := e.G().TrackCache.Insert(e.outcome)
 	if err != nil {
 		return err
 	}
-	e.G().Log.Debug("IdentifyCache key: %q", key)
+	e.G().Log.Debug("TrackCache key: %q", key)
 	e.trackToken = key
 
 	return nil
@@ -138,7 +150,7 @@ func (e *Identify) Outcome() *libkb.IdentifyOutcome {
 	return e.outcome
 }
 
-func (e *Identify) TrackToken() libkb.IdentifyCacheToken {
+func (e *Identify) TrackToken() keybase1.TrackToken {
 	return e.trackToken
 }
 
@@ -147,7 +159,7 @@ func (e *Identify) TrackInstructions() *libkb.TrackInstructions {
 }
 
 func (e *Identify) run(ctx *Context) (*libkb.IdentifyOutcome, error) {
-	res := libkb.NewIdentifyOutcome(e.arg.WithTracking)
+	res := libkb.NewIdentifyOutcome()
 	res.Username = e.user.GetName()
 	is := libkb.NewIdentifyState(res, e.user)
 
@@ -165,8 +177,10 @@ func (e *Identify) run(ctx *Context) (*libkb.IdentifyOutcome, error) {
 			return nil, err
 		}
 		if tlink != nil {
-			is.CreateTrackLookup(tlink)
-			res.TrackUsed = is.TrackLookup()
+			is.SetTrackLookup(tlink)
+			if ttcl, _ := e.me.TmpTrackChainLinkFor(e.user.GetName(), e.user.GetUID()); ttcl != nil {
+				is.SetTmpTrackLookup(ttcl)
+			}
 		}
 	}
 
@@ -178,16 +192,16 @@ func (e *Identify) run(ctx *Context) (*libkb.IdentifyOutcome, error) {
 
 	e.G().Log.Debug("+ Identify(%s)", e.user.GetName())
 
-	is.ComputeKeyDiffs(ctx.IdentifyUI.DisplayKey)
-	is.InitResultList()
-	is.ComputeTrackDiffs()
-	is.ComputeRevokedProofs()
+	is.Precompute(ctx.IdentifyUI.DisplayKey)
 
 	ctx.IdentifyUI.LaunchNetworkChecks(res.ExportToUncheckedIdentity(), e.user.Export())
-	e.user.IDTable().Identify(is, e.arg.ForceRemoteCheck, ctx.IdentifyUI)
+	waiter := e.displayUserCardAsync(ctx)
+
+	e.user.IDTable().Identify(is, e.arg.ForceRemoteCheck, ctx.IdentifyUI, nil)
+	waiter()
 
 	base := e.user.BaseProofSet()
-	res.AddProofsToSet(base)
+	res.AddProofsToSet(base, []keybase1.ProofState{keybase1.ProofState_OK})
 	if !e.userExpr.MatchSet(*base) {
 		return nil, fmt.Errorf("User %s didn't match given assertion", e.user.GetName())
 	}
@@ -237,7 +251,7 @@ func (e *Identify) loadUserArg() (*libkb.LoadUserArg, error) {
 	// That is, it might be the keybase assertion (if there), or otherwise,
 	// something that's unique like Twitter or Github, and lastly,
 	// something like DNS that is more likely ambiguous...
-	b := e.findBestComponent(e.userExpr)
+	b := libkb.FindBestIdentifyComponent(e.userExpr)
 	if len(b) == 0 {
 		return nil, fmt.Errorf("Cannot lookup user with %q", e.arg.TargetUsername)
 	}
@@ -257,34 +271,94 @@ func (e *Identify) loadExpr(assertion string) error {
 	return nil
 }
 
-func (e *Identify) findBestComponent(expr libkb.AssertionExpression) string {
-	urls := expr.CollectUrls(nil)
-	if len(urls) == 0 {
-		return ""
+func (e *Identify) shortCircuitSelfID(ctx *Context) error {
+	e.G().Log.Debug("Identify: short-circuiting self identification")
+	e.selfShortCircuit = true
+
+	// don't really need anything but username here
+	e.outcome = libkb.NewIdentifyOutcome()
+	e.outcome.Username = e.user.GetName()
+
+	return nil
+}
+
+// DidShortCircuit returns true if shortCircuitSelfID happened.
+func (e *Identify) DidShortCircuit() bool {
+	return e.selfShortCircuit
+}
+
+type card struct {
+	Status        libkb.AppStatus `json:"status"`
+	FollowSummary struct {
+		Following int `json:"following"`
+		Followers int `json:"followers"`
+	} `json:"follow_summary"`
+	Profile struct {
+		FullName string `json:"full_name"`
+		Location string `json:"location"`
+		Bio      string `json:"bio"`
+		Website  string `json:"website"`
+		Twitter  string `json:"twitter"`
+	} `json:"profile"`
+	YouFollowThem bool `json:"you_follow_them"`
+	TheyFollowYou bool `json:"they_follow_you"`
+}
+
+func (c *card) GetAppStatus() *libkb.AppStatus {
+	return &c.Status
+}
+
+func getUserCard(g *libkb.GlobalContext, uid keybase1.UID, useSession bool) (ret *keybase1.UserCard, err error) {
+	defer g.Trace("getUserCard", func() error { return err })()
+
+	arg := libkb.APIArg{
+		Endpoint:     "user/card",
+		NeedSession:  useSession,
+		Contextified: libkb.NewContextified(g),
+		Args:         libkb.HTTPArgs{"uid": libkb.S{Val: uid.String()}},
 	}
 
-	var uid, kb, soc, fp libkb.AssertionURL
+	var card card
 
-	for _, u := range urls {
-		if u.IsUID() {
-			uid = u
-			break
-		}
-
-		if u.IsKeybase() {
-			kb = u
-		} else if u.IsFingerprint() && fp == nil {
-			fp = u
-		} else if u.IsSocial() && soc == nil {
-			soc = u
-		}
+	if err = g.API.GetDecode(arg, &card); err != nil {
+		g.Log.Warning("error getting user/card for %s: %s\n", uid, err)
+		return nil, err
 	}
 
-	order := []libkb.AssertionURL{uid, kb, fp, soc, urls[0]}
-	for _, p := range order {
-		if p != nil {
-			return p.String()
-		}
+	g.Log.Debug("user card: %+v", card)
+
+	ret = &keybase1.UserCard{
+		Following:     card.FollowSummary.Following,
+		Followers:     card.FollowSummary.Followers,
+		Uid:           uid,
+		FullName:      card.Profile.FullName,
+		Location:      card.Profile.Location,
+		Bio:           card.Profile.Bio,
+		Website:       card.Profile.Website,
+		Twitter:       card.Profile.Twitter,
+		YouFollowThem: card.YouFollowThem,
+		TheyFollowYou: card.TheyFollowYou,
 	}
-	return ""
+	return ret, nil
+}
+
+func displayUserCard(g *libkb.GlobalContext, ctx *Context, uid keybase1.UID, useSession bool) {
+	card, _ := getUserCard(g, uid, useSession)
+	if card != nil {
+		ctx.IdentifyUI.DisplayUserCard(*card)
+	}
+}
+
+func displayUserCardAsync(g *libkb.GlobalContext, ctx *Context, uid keybase1.UID, useSession bool) (waiter func()) {
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		displayUserCard(g, ctx, uid, useSession)
+		wg.Done()
+	}()
+	return func() { wg.Wait() }
+}
+
+func (e *Identify) displayUserCardAsync(ctx *Context) (waiter func()) {
+	return displayUserCardAsync(e.G(), ctx, e.user.GetUID(), (e.me != nil))
 }

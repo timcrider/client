@@ -1,22 +1,31 @@
+// Copyright 2015 Keybase, Inc. All rights reserved. Use of
+// this source code is governed by the included BSD license.
+
 package service
 
 import (
 	"github.com/keybase/client/go/engine"
-	keybase1 "github.com/keybase/client/protocol/go"
-	"github.com/maxtaco/go-framed-msgpack-rpc/rpc2"
+	"github.com/keybase/client/go/libkb"
+	keybase1 "github.com/keybase/client/go/protocol"
+	rpc "github.com/keybase/go-framed-msgpack-rpc"
+	"golang.org/x/net/context"
 )
 
 // SigsHandler is the RPC handler for the sigs interface.
 type SigsHandler struct {
 	*BaseHandler
+	libkb.Contextified
 }
 
 // NewSigsHandler creates a SigsHandler for the xp transport.
-func NewSigsHandler(xp *rpc2.Transport) *SigsHandler {
-	return &SigsHandler{BaseHandler: NewBaseHandler(xp)}
+func NewSigsHandler(xp rpc.Transporter, g *libkb.GlobalContext) *SigsHandler {
+	return &SigsHandler{
+		BaseHandler:  NewBaseHandler(xp),
+		Contextified: libkb.NewContextified(g),
+	}
 }
 
-func (h *SigsHandler) SigList(arg keybase1.SigListArg) ([]keybase1.Sig, error) {
+func (h *SigsHandler) SigList(_ context.Context, arg keybase1.SigListArg) ([]keybase1.Sig, error) {
 	eng, err := h.run(arg.Arg)
 	if err != nil {
 		return nil, err
@@ -24,7 +33,7 @@ func (h *SigsHandler) SigList(arg keybase1.SigListArg) ([]keybase1.Sig, error) {
 	return eng.Sigs(), nil
 }
 
-func (h *SigsHandler) SigListJSON(arg keybase1.SigListJSONArg) (string, error) {
+func (h *SigsHandler) SigListJSON(_ context.Context, arg keybase1.SigListJSONArg) (string, error) {
 	eng, err := h.run(arg.Arg)
 	if err != nil {
 		return "", err
@@ -56,7 +65,7 @@ func (h *SigsHandler) run(args keybase1.SigListArgs) (*engine.SigsList, error) {
 		f(args.Types.IsSelf, "self")
 		ea.Types = t
 	}
-	eng := engine.NewSigsList(ea, G)
+	eng := engine.NewSigsList(ea, h.G())
 	if err := engine.RunEngine(eng, ctx); err != nil {
 		return nil, err
 	}

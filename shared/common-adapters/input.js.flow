@@ -1,0 +1,34 @@
+/* @flow */
+
+import React, {Component} from 'react'
+
+export type Props = $Shape<{
+  autoFocus?: bool,
+  errorText?: ?string,
+  errorStyle?: ?Object,
+  floatingLabelText?: string,
+  hintText?: string,
+  hintStyle?: Object,
+  multiLine?: bool,
+  onKeyDown?: (event: Object) => void,
+  onChange?: (event: Object) => void,
+  onChangeText?: (text: string) => void,
+  onEnterKeyDown?: (event: Object) => void,
+  rows?: number,
+  rowsMax?: number,
+  style?: Object,
+  textStyle?: Object,
+  inputStyle?: Object,
+  iosOmitUnderline?: boolean,
+  underlineStyle?: Object,
+  type?: 'password' | 'text' | 'passwordVisible',
+  autoCapitalize?: 'none' | 'sentences' | 'words' | 'characters',
+  value?: ?string,
+  small?: bool,
+  errorStyle?: Object,
+  keyboardType?: 'default' | 'email-address' | 'numeric' | 'phone-pad' | 'ascii-capable' | 'numbers-and-punctuation' | 'url' | 'number-pad' | 'name-phone-pad' | 'decimal-pad' | 'twitter' | 'web-search'
+}>
+
+declare export default class Input extends React.Component {
+  props: Props;
+}

@@ -1,65 +1,51 @@
 default: build
 all: build
 
-AVRO=java -jar jar/avro-tools-1.7.7.jar idl
 ICED=node_modules/.bin/iced
+AVDL2JSON=node_modules/.bin/avdl2json
+AVDLC=node_modules/.bin/avdlc
+
+$(AVDL2JSON): config
 
 json/%.json: avdl/%.avdl
-	$(AVRO) $< $@~ && mv $@~ $@
+	$(AVDL2JSON) -i $< -o $@~ && mv $@~ $@
 
 config:
-	npm install -d
+	npm i
 
-build-stamp: \
-	json/account.json \
-	json/block.json \
-	json/btc.json \
-	json/config.json \
-	json/crypto.json \
-	json/ctl.json \
-	json/device.json \
-	json/doctor.json \
-	json/doctor_ui.json \
-	json/favorite.json \
-	json/gpg_ui.json \
-	json/identify.json \
-	json/identify_ui.json \
-	json/locksmith_ui.json \
-	json/log_ui.json \
-	json/login.json \
-	json/login_ui.json \
-	json/metadata.json \
-	json/metadata_update.json \
-	json/pgp.json \
-	json/prove.json \
-	json/prove_ui.json \
-	json/quota.json \
-	json/revoke.json \
-	json/secret_ui.json \
-	json/session.json \
-	json/signup.json \
-	json/sigs.json \
-	json/stream_ui.json \
-	json/test.json \
-	json/track.json \
-	json/ui.json \
-	json/user.json
+# By default, all avdl/*.avdl are considered and made into outputs
+# as long as they have messages in them. BUT you can override this
+# check via -f. So the two files specified here via -f don't have
+# messages but should be made into .json's...
+build-stamp: avdl/*.avdl $(AVDL2JSON) | config
 	@mkdir -p json
+	$(AVDL2JSON) -2 -b -o json -f avdl/constants.avdl -f avdl/install.avdl  avdl/*.avdl
 	date > $@
 
-go/keybase_v1.go: build-stamp
-	@mkdir -p go/
-	$(ICED) ./bin/go.iced -v 2 -d json -t go -o $@
-	gofmt -w $@
-
-objc-build-stamp: build-stamp
-	ruby ./bin/objc.rb
+go-build-stamp: avdl/*.avdl $(AVDLC) | config
+	@mkdir -p ../go/protocol
+	$(AVDLC) -b -l go -o ../go/protocol avdl/*.avdl
+	(cd ../go/protocol && go fmt ./...)
 	date > $@
+
+js/flow-types.js: build-stamp | config
+	@mkdir -p js/
+	node --harmony ./bin/flow.js
+	cp ./js/flow-types.js ../shared/constants/types
+	cp ./js/flow-types-gregor.js ../shared/constants/types
+
+js/keybase_v1.js: build-stamp | config
+	@mkdir -p js/
+	node --harmony ./bin/js.js
+	cp ./js/keybase-v1.js ../shared/constants/types
 
 clean:
-	rm -rf json/*.json go/keybase_v1.go objc/*
+	rm -rf json/*.json js/*.js *build-stamp
+	$(AVDLC) -c -b -l go -o ../go/protocol avdl/*.avdl
 
-build: build-stamp go/keybase_v1.go objc-build-stamp
+fmt:
+	@./fmt.sh
 
-.PHONY: test setup config
+build: fmt build-stamp go-build-stamp js/keybase_v1.js js/flow-types.js
 
+.PHONY: test config

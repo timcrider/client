@@ -1,0 +1,227 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Wix xmlns="http://schemas.microsoft.com/wix/2006/wi">
+	<Product Id="*" Name="Keybase Apps" Language="1033" Version="$(env.KEYBASE_WINVER)" Manufacturer="Keybase, Inc." UpgradeCode="c118f7ec-9a1d-4ff1-91f5-15d208499d7b">
+		<Package InstallerVersion="500" Compressed="yes" InstallPrivileges="limited" InstallScope="perUser" />
+    <MediaTemplate EmbedCab="yes"/>
+    <Icon Id="ProductIcon" SourceFile="$(env.GOPATH)\src\github.com\keybase\client\packaging\windows\keybase.ico"/>
+    <Property Id="ARPPRODUCTICON" Value="ProductIcon"/>
+    <Property Id="ARPHELPLINK" Value="https://www.keybase.io"/>
+    <Property Id="ARPURLINFOABOUT" Value="https://www.keybase.io"/>
+
+    
+    <MajorUpgrade DowngradeErrorMessage="A newer version of Keybase is already installed." AllowSameVersionUpgrades="yes"  />		
+
+		<Feature Id="ProductFeature" Title="Keybase Application" Level="1">
+			<ComponentGroupRef Id="ProductComponents" />
+      <ComponentGroupRef Id="GuiComponents" />
+      <ComponentGroupRef Id="PrompterComponents" />
+      <ComponentGroupRef Id="ApplicationShortcuts" />
+      <ComponentGroupRef Id="StartupShortcuts" />
+    </Feature>
+
+
+    <InstallExecuteSequence>
+      <InstallValidate Suppress="yes">FAKE_PROPERTY</InstallValidate>
+      <Custom Action="StopUpdater" Before="InstallValidate"/>
+      <Custom Action="StopGUI" Before="InstallValidate"/>
+      <Custom Action="StopKBFS" Before="InstallValidate"/>
+      <Custom Action="StopMainApp" Before="InstallValidate"/>
+      <Custom Action="RunMainApp" Before="InstallFinalize">NOT (REMOVE ~= "ALL")</Custom>
+      <Custom Action="RunGUI" Before="InstallFinalize">NOT (REMOVE ~= "ALL")</Custom>
+    </InstallExecuteSequence>
+
+
+    <Property Id="Setup">Setup</Property>
+    <Property Id="ButtonText_No">&amp;No</Property>
+    <Property Id="ButtonText_Yes">&amp;Yes</Property>
+    <Property Id="ButtonText_Install">&amp;Install</Property>
+    <Property Id="ButtonText_Cancel">Cancel</Property>
+    <Property Id="BannerBitmap">bannrbmp</Property>
+    <Property Id="Wizard">Setup Wizard</Property>
+    <Property Id="InfoIcon">info</Property>
+
+    <Binary Id="info" SourceFile="Binary\Info.ico" />
+    <Binary Id="bannrbmp" SourceFile="Binary\Banner.bmp" />
+  </Product>
+  <Fragment>
+		<Directory Id="TARGETDIR" Name="SourceDir">
+			<Directory Id="AppDataFolder">
+        <Directory Id="INSTALLFOLDER" Name="Keybase">
+          <Directory Id="PROMPTERFOLDER" Name="prompter"/>
+        </Directory>
+      </Directory>
+      <Directory Id="ProgramMenuFolder">
+        <Directory Id="ApplicationProgramsFolder" Name="Keybase"/>
+      </Directory>
+      <Directory Id="StartupFolder" Name="Startup" />
+      <Directory Id="SystemFolder" Name="System" />
+    </Directory>
+	</Fragment>
+  
+	<Fragment>
+		<ComponentGroup Id="ProductComponents" Directory="INSTALLFOLDER">
+			<Component Id="keybase.exe" Guid="88737432-0E15-413D-B23C-4B18D06EDC2C">				
+        <CreateFolder />
+        <RemoveFolder Id="RemoveMyApp" On="uninstall" />
+        <!-- The heat tool output (which generates gui.wxs) won't work if there are directories with only subdirectories
+        and no removable components, so we have to special-case them here and in the xsl transform (gui.xsl) -->
+        <RemoveFolder Id="GuiResourcesDirRemove" On="uninstall" Directory="GuiResourcesDir"/>
+        <RemoveFolder Id="GuiSharedDirRemove" On="uninstall" Directory="GuiSharedDir"/>
+        <RegistryKey Root="HKCU" Key="Software\Keybase\Keybase">
+          <RegistryValue Name="KeybaseExe" Value="1" KeyPath="yes" Type="integer" />
+        </RegistryKey>
+        <File Id="keybase.exe" Source="$(env.GOPATH)\src\github.com\keybase\client\go\keybase\keybase.exe" Checksum="yes"/>
+			</Component>
+      <Component Id="runquiet.exe" Guid="{1265F74B-0775-4522-A67D-25422D1984A3}">
+        <CreateFolder />
+        <RemoveFolder Id="RemoveMyAppRunner" On="uninstall" />
+        <RegistryKey Root="HKCU" Key="Software\Keybase\Keybase">
+          <RegistryValue Name="runquietexe" Value="1" KeyPath="yes" Type="integer" />
+        </RegistryKey>
+        <File Id="runquiet.exe" Source="$(env.GOPATH)\src\github.com\keybase\client\go\tools\runquiet\runquiet.exe" Checksum="yes"/>
+      </Component>
+
+      <Component Id="KbfsDokanExe" Guid="{98A16FB9-D314-495A-806C-B75DCB74CF9D}">
+        <CreateFolder />
+        <RemoveFolder Id="RemoveDokan" On="uninstall" />
+        <RegistryKey Root="HKCU" Key="Software\Keybase\Keybase">
+          <RegistryValue Name="KbfsDokanExe" Value="1" KeyPath="yes" Type="integer" />
+        </RegistryKey>
+        <File Id='KbfsDokanExe' DiskId='1' Source="$(env.GOPATH)\src\github.com\keybase\kbfs\kbfsdokan\kbfsdokan.exe" />
+      </Component>
+
+      <Component Id="upd.exe" Guid="{65C18DA3-BCD5-4E18-9C80-AC66471B433A}">
+        <CreateFolder />
+        <RemoveFolder Id="RemoveUpdater" On="uninstall" />
+        <RegistryKey Root="HKCU" Key="Software\Keybase\Keybase">
+          <RegistryValue Name="updaterexe" Value="1" KeyPath="yes" Type="integer" />
+        </RegistryKey>
+        <File Id="upd.exe" Source="$(env.GOPATH)\src\github.com\keybase\go-updater\service\upd.exe" Checksum="yes"/>
+      </Component>
+
+    </ComponentGroup>
+  </Fragment>
+  <Fragment>
+    <ComponentGroup Id="PrompterComponents" Directory="PROMPTERFOLDER">
+      <Component Id="prompter.hta" Guid="{424BA879-35A2-4853-8F3D-6D8112655FF6}">
+        <CreateFolder />
+        <RemoveFolder Id="RemovePrompterHta" On="uninstall" />
+        <RegistryKey Root="HKCU" Key="Software\Keybase\Keybase">
+          <RegistryValue Name="prompterhta" Value="1" KeyPath="yes" Type="integer" />
+        </RegistryKey>
+        <File Id="prompter.hta" Source="$(env.GOPATH)\src\github.com\keybase\go-updater\windows\prompter\prompter.hta" Checksum="yes"/>
+      </Component>
+      <Component Id="keybase.ico" Guid="{747ACACB-5F0E-4979-AFA8-6C6401481C19}">
+        <CreateFolder />
+        <RemoveFolder Id="RemovePrompterKeybaseIco" On="uninstall" />
+        <RegistryKey Root="HKCU" Key="Software\Keybase\Keybase">
+          <RegistryValue Name="prompterkbicon" Value="1" KeyPath="yes" Type="integer" />
+        </RegistryKey>
+        <File Id="keybase.ico" Source="$(env.GOPATH)\src\github.com\keybase\go-updater\windows\prompter\keybase.ico" Checksum="yes"/>
+      </Component>
+      <Component Id="keybase.png" Guid="{FC444587-2B9D-4E7D-A926-F0BC5A239F42}">
+        <CreateFolder />
+        <RemoveFolder Id="RemovePrompterKeybasePng" On="uninstall" />
+        <RegistryKey Root="HKCU" Key="Software\Keybase\Keybase">
+          <RegistryValue Name="prompterkbpng" Value="1" KeyPath="yes" Type="integer" />
+        </RegistryKey>
+        <File Id="icon_128x128.png" Source="$(env.GOPATH)\src\github.com\keybase\go-updater\windows\prompter\icon_128x128.png" Checksum="yes"/>
+      </Component>
+    </ComponentGroup>
+  </Fragment>
+  <Fragment>
+    <ComponentGroup Id="StartupShortcuts" Directory="StartupFolder">
+      <Component Id="AppShortCutStartUpComponent" Guid="{2EE65854-7CA1-4010-B62B-780F1C39ED0A}">
+        <Shortcut Id="AppShortCutStartUp" Name="KeybaseStartup"
+                  Description="Start Keybase at boot"
+                  Target="[INSTALLFOLDER]runquiet.exe"
+                  Arguments="keybase.exe ctl watchdog2"
+                  WorkingDirectory="INSTALLFOLDER"/>
+        <RegistryKey Root="HKCU" Key="Software\Keybase\Keybase">
+          <RegistryValue Name="ShortCutStartUp" Type="integer" Value="1" KeyPath="yes"  />
+        </RegistryKey>
+      </Component>
+      <Component Id="GUIShortCutStartUpComponent" Guid="{4AC98412-7636-4727-AB39-44A98E25249A}">
+        <Shortcut Id="GUIShortCutStartUp" Name="GUIStartup"
+                  Description="Start GUI at boot"
+                  Target="[INSTALLFOLDER]runquiet.exe"
+                  Arguments="[GuiDir]Keybase.exe"
+                  WorkingDirectory="INSTALLFOLDER"/>
+        <RegistryKey Root="HKCU" Key="Software\Keybase\Keybase">
+          <RegistryValue Name="ShortCutStartUpGUI" Type="integer" Value="1" KeyPath="yes"  />
+        </RegistryKey>
+      </Component>
+    </ComponentGroup>
+    
+  </Fragment>
+  
+  <Fragment>
+    <ComponentGroup Id="ApplicationShortcuts" Directory="ApplicationProgramsFolder">
+      <Component Id="ApplicationShortcut" Guid="E05F8D29-F530-4791-AE6B-B89DAE1F6D5C">
+          <Shortcut Id="ApplicationStartMenuShortcut"
+              Name="Keybase Shell"
+              Description="Open command console with keybase in the local path"
+              Target="[SystemFolder]cmd.exe"
+              Arguments="/K &quot;set PATH=%PATH%;[INSTALLFOLDER]&quot;"
+              WorkingDirectory="INSTALLFOLDER"      
+              Icon="ProductIcon"/>
+          <RemoveFolder Id="ApplicationProgramsFolder" On="uninstall"/>
+          <RegistryValue Root="HKCU" Key="Software\Keybase\Keybase" Name="installed" Type="integer" Value="1" KeyPath="yes"/>
+      </Component>
+      <Component Id="GUIShortCutComponent" Guid="{034E2E25-3676-4101-87F5-F6E081CA446A}">
+        <Shortcut Id="GUIShortCut"
+                  Name="Keybase"
+                  Description="Start GUI"
+                  Target="[GuiDir]Keybase.exe"
+                  WorkingDirectory="GuiDir"/>
+        <RegistryKey Root="HKCU" Key="Software\Keybase\Keybase">
+          <RegistryValue Name="ShortCutGUI" Type="integer" Value="1" KeyPath="yes"  />
+        </RegistryKey>
+      </Component>
+
+    </ComponentGroup>
+  </Fragment>
+  <Fragment>
+    <CustomAction Id="RunMainApp"
+              Directory="INSTALLFOLDER"
+              ExeCommand="[INSTALLFOLDER]runquiet.exe [INSTALLFOLDER]keybase.exe ctl watchdog2"
+              Execute="commit"
+              Return="ignore"/>    
+  </Fragment>
+  <Fragment>
+    <CustomAction Id="StopMainApp"
+              Directory="INSTALLFOLDER"
+              ExeCommand="[INSTALLFOLDER]runquiet.exe -wait [INSTALLFOLDER]keybase.exe ctl stop"
+              Execute="immediate"
+              Return="ignore"/>
+  </Fragment>
+  <Fragment>
+    <CustomAction Id="StopKBFS"
+              Directory="INSTALLFOLDER"
+              ExeCommand="[INSTALLFOLDER]runquiet.exe -wait [WindowsFolder]\System32\taskkill.exe /F /IM kbfsdokan.exe"
+              Execute="immediate"
+              Return="ignore"/>
+  </Fragment>
+  <Fragment>
+    <CustomAction Id="StopUpdater"
+              Directory="INSTALLFOLDER"
+              ExeCommand="[INSTALLFOLDER]runquiet.exe -wait [WindowsFolder]\System32\taskkill.exe /F /IM upd.exe"
+              Execute="immediate"
+              Return="ignore"/>
+  </Fragment>
+
+  <Fragment>
+    <CustomAction Id="RunGUI"
+              Directory="GuiDir"
+              ExeCommand="[INSTALLFOLDER]runquiet.exe [GuiDir]Keybase.exe"
+              Execute="commit"
+              Return="ignore"/>
+  </Fragment>
+  <Fragment>
+    <CustomAction Id="StopGUI"
+              Directory="INSTALLFOLDER"
+              ExeCommand="[INSTALLFOLDER]runquiet.exe -wait [WindowsFolder]\System32\taskkill.exe /F /IM Keybase.exe"
+              Execute="immediate"
+              Return="ignore"/>
+  </Fragment>
+  </Wix>

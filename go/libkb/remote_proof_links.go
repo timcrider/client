@@ -1,7 +1,10 @@
+// Copyright 2015 Keybase, Inc. All rights reserved. Use of
+// this source code is governed by the included BSD license.
+
 package libkb
 
 import (
-	keybase1 "github.com/keybase/client/protocol/go"
+	keybase1 "github.com/keybase/client/go/protocol"
 	jsonw "github.com/keybase/go-jsonw"
 )
 
@@ -45,11 +48,19 @@ func (r *RemoteProofLinks) ForService(st ServiceType) []RemoteProofChainLink {
 				continue
 			}
 			links = append(links, l.link)
-			if l.link.LastWriterWins() {
-				break
-			}
 		}
 	}
+
+	// Chop the array off if it's a last-writer wins service
+	// (like many social networks).
+	for i := len(links) - 1; i >= 0; i-- {
+		if links[i].LastWriterWins() {
+			links = links[i:]
+			break
+		}
+
+	}
+
 	return links
 }
 
@@ -95,38 +106,58 @@ func (r *RemoteProofLinks) TrackSet() *TrackSet {
 	return ret
 }
 
-// AddProofsToSet adds the active proofs to an existing ProofSet.
-func (r *RemoteProofLinks) AddProofsToSet(existing *ProofSet) {
+// AddProofsToSet adds the active proofs to an existing ProofSet, if they're one of the
+// given OkStates. If okStates is nil, then we check only against keybase1.ProofState_OK.
+func (r *RemoteProofLinks) AddProofsToSet(existing *ProofSet, okStates []keybase1.ProofState) {
+	if okStates == nil {
+		okStates = []keybase1.ProofState{keybase1.ProofState_OK}
+	}
+	isOkState := func(s1 keybase1.ProofState) bool {
+		for _, s2 := range okStates {
+			if s1 == s2 {
+				return true
+			}
+		}
+		return false
+	}
 	for _, a := range r.active() {
-		if a.state != keybase1.ProofState_OK {
+		if !isOkState(a.state) {
 			continue
 		}
-		k, v := a.link.ToKeyValuePair()
-		existing.Add(Proof{Key: k, Value: v})
+		AddToProofSetNoChecks(a.link, existing)
 	}
+}
+
+func RemoteProofChainLinkToProof(r RemoteProofChainLink) Proof {
+	k, v := r.ToKeyValuePair()
+	return Proof{Key: k, Value: v}
+}
+
+func AddToProofSetNoChecks(r RemoteProofChainLink, ps *ProofSet) {
+	ps.Add(RemoteProofChainLinkToProof(r))
 }
 
 func (r *RemoteProofLinks) active() []ProofLinkWithState {
 	var links []ProofLinkWithState
-	seen := make(map[string]bool)
+	seen := make(map[string]struct{})
+
+	// Loop over all types of services
 	for _, list := range r.links {
+
+		// Loop over all proofs for that type, from most recent,
+		// to oldest.
 		for i := len(list) - 1; i >= 0; i-- {
 			both := list[i]
 			link := both.link
-			if link.IsRevoked() {
-				continue
+			if !link.IsRevoked() {
+				id := CanonicalProofName(link)
+				// We only want to use the last proof in the list
+				// if we have several (like for dns://chriscoyne.com)
+				if _, ok := seen[id]; !ok {
+					links = append(links, both)
+					seen[id] = struct{}{}
+				}
 			}
-
-			// We only want to use the last proof in the list
-			// if we have several (like for dns://chriscoyne.com)
-			id := link.ToDisplayString()
-			if seen[id] {
-				continue
-			}
-
-			links = append(links, both)
-			seen[id] = true
-
 			// Things like Twitter, Github, etc, are last-writer wins.
 			// Things like dns/https can have multiples
 			if link.LastWriterWins() {
@@ -154,3 +185,5 @@ func (p ProofLinkWithState) ToIDString() string {
 func (p ProofLinkWithState) ToKeyValuePair() (string, string) {
 	return p.link.ToKeyValuePair()
 }
+
+func (p ProofLinkWithState) GetProofType() keybase1.ProofType { return p.link.GetProofType() }

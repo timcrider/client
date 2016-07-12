@@ -1,43 +1,43 @@
+// Copyright 2015 Keybase, Inc. All rights reserved. Use of
+// this source code is governed by the included BSD license.
+
 package service
 
 import (
-	"fmt"
+	"golang.org/x/net/context"
 
-	keybase1 "github.com/keybase/client/protocol/go"
+	"github.com/keybase/client/go/libkb"
+	keybase1 "github.com/keybase/client/go/protocol"
+	rpc "github.com/keybase/go-framed-msgpack-rpc"
 )
 
-type LogUI struct {
-	sessionID int
-	cli       *keybase1.LogUiClient
+// LogHandler is the RPC handler for the log interface.
+type LogHandler struct {
+	*BaseHandler
+	logReg *logRegister
+	libkb.Contextified
 }
 
-func (l *LogUI) Log(level keybase1.LogLevel, format string, args []interface{}) {
-	msg := fmt.Sprintf(format, args...)
-	l.cli.Log(keybase1.LogArg{
-		SessionID: l.sessionID,
-		Level:     keybase1.LogLevel(level),
-		Text: keybase1.Text{
-			Markup: false,
-			Data:   msg,
-		},
-	})
+// NewLogHandler creates a LogHandler for the xp transport.
+func NewLogHandler(xp rpc.Transporter, logReg *logRegister, g *libkb.GlobalContext) *LogHandler {
+	return &LogHandler{
+		BaseHandler:  NewBaseHandler(xp),
+		logReg:       logReg,
+		Contextified: libkb.NewContextified(g),
+	}
 }
 
-func (l *LogUI) Debug(format string, args ...interface{}) {
-	l.Log(keybase1.LogLevel_DEBUG, format, args)
-}
-func (l *LogUI) Info(format string, args ...interface{}) {
-	l.Log(keybase1.LogLevel_INFO, format, args)
-}
-func (l *LogUI) Critical(format string, args ...interface{}) {
-	l.Log(keybase1.LogLevel_CRITICAL, format, args)
-}
-func (l *LogUI) Warning(format string, args ...interface{}) {
-	l.Log(keybase1.LogLevel_WARN, format, args)
-}
-func (l *LogUI) Errorf(format string, args ...interface{}) {
-	l.Log(keybase1.LogLevel_ERROR, format, args)
-}
-func (l *LogUI) Notice(format string, args ...interface{}) {
-	l.Log(keybase1.LogLevel_NOTICE, format, args)
+func (h *LogHandler) RegisterLogger(_ context.Context, arg keybase1.RegisterLoggerArg) (err error) {
+	h.G().Log.Debug("LogHandler::RegisterLogger: %+v", arg)
+	defer h.G().Trace("LogHandler::RegisterLogger", func() error { return err })()
+
+	if h.logReg == nil {
+		// if not a daemon, h.logReg will be nil
+		h.G().Log.Debug("- logRegister is nil, ignoring RegisterLogger request")
+		return nil
+	}
+
+	ui := &LogUI{sessionID: arg.SessionID, cli: h.getLogUICli()}
+	err = h.logReg.RegisterLogger(arg, ui)
+	return err
 }

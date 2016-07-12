@@ -1,16 +1,20 @@
+// Copyright 2015 Keybase, Inc. All rights reserved. Use of
+// this source code is governed by the included BSD license.
+
 package engine
 
 import (
 	"fmt"
 
 	"github.com/keybase/client/go/libkb"
-	keybase1 "github.com/keybase/client/protocol/go"
+	keybase1 "github.com/keybase/client/go/protocol"
 )
 
 type DeviceKeygenArgs struct {
 	Me         *libkb.User
 	DeviceID   keybase1.DeviceID
 	DeviceName string
+	DeviceType string
 	Lks        *libkb.LKSec
 }
 
@@ -104,6 +108,10 @@ func (e *DeviceKeygen) SigningKey() libkb.NaclKeyPair {
 	return e.naclSignGen.GetKeyPair()
 }
 
+func (e *DeviceKeygen) EncryptionKey() libkb.NaclKeyPair {
+	return e.naclEncGen.GetKeyPair()
+}
+
 // Push pushes the generated keys to the api server and stores the
 // local key security server half on the api server as well.
 func (e *DeviceKeygen) Push(ctx *Context, pargs *DeviceKeygenPushArgs) error {
@@ -125,6 +133,7 @@ func (e *DeviceKeygen) Push(ctx *Context, pargs *DeviceKeygenPushArgs) error {
 	}
 
 	ds = e.appendEncKey(ds, ctx, encSigner, eldestKID, pargs.User)
+
 	e.pushErr = libkb.DelegatorAggregator(ctx.LoginContext, ds)
 
 	// push the LKS server half
@@ -176,10 +185,10 @@ func (e *DeviceKeygen) localSave(ctx *Context) {
 		return
 	}
 
-	if e.runErr = e.naclSignGen.SaveLKS(e.args.Lks, ctx.LoginContext); e.runErr != nil {
+	if e.runErr = e.naclSignGen.SaveLKS(e.G(), e.args.Lks, ctx.LoginContext); e.runErr != nil {
 		return
 	}
-	if e.runErr = e.naclEncGen.SaveLKS(e.args.Lks, ctx.LoginContext); e.runErr != nil {
+	if e.runErr = e.naclEncGen.SaveLKS(e.G(), e.args.Lks, ctx.LoginContext); e.runErr != nil {
 		return
 	}
 }
@@ -192,6 +201,7 @@ func (e *DeviceKeygen) appendEldest(ds []libkb.Delegator, ctx *Context, pargs *D
 	var d libkb.Delegator
 	d, e.pushErr = e.naclSignGen.Push(ctx.LoginContext, true)
 	if e.pushErr == nil {
+		d.SetGlobalContext(e.G())
 		return append(ds, d)
 	}
 
@@ -204,9 +214,11 @@ func (e *DeviceKeygen) appendSibkey(ds []libkb.Delegator, ctx *Context, pargs *D
 	}
 
 	var d libkb.Delegator
+
 	e.naclSignGen.UpdateArg(pargs.Signer, pargs.EldestKID, true, pargs.User)
 	d, e.pushErr = e.naclSignGen.Push(ctx.LoginContext, true)
 	if e.pushErr == nil {
+		d.SetGlobalContext(e.G())
 		return append(ds, d)
 	}
 
@@ -223,6 +235,7 @@ func (e *DeviceKeygen) appendEncKey(ds []libkb.Delegator, ctx *Context, signer l
 	var d libkb.Delegator
 	d, e.pushErr = e.naclEncGen.Push(ctx.LoginContext, true)
 	if e.pushErr == nil {
+		d.SetGlobalContext(e.G())
 		return append(ds, d)
 	}
 
@@ -259,7 +272,11 @@ func (e *DeviceKeygen) pushLKS(ctx *Context) {
 	}
 
 	// send it to api server
-	e.pushErr = libkb.PostDeviceLKS(ctx.LoginContext, e.args.DeviceID, libkb.DeviceTypeDesktop, serverHalf, e.args.Lks.Generation(), chr, chrk)
+	var sr libkb.SessionReader
+	if ctx.LoginContext != nil {
+		sr = ctx.LoginContext.LocalSession()
+	}
+	e.pushErr = libkb.PostDeviceLKS(sr, e.args.DeviceID, e.args.DeviceType, serverHalf, e.args.Lks.Generation(), chr, chrk)
 	if e.pushErr != nil {
 		return
 	}
@@ -279,7 +296,6 @@ func (e *DeviceKeygen) newNaclArg(ctx *Context, gen libkb.NaclGenerator, expire 
 		Device:    e.device(),
 		Me:        e.args.Me,
 		ExpireIn:  expire,
-		LogUI:     ctx.LogUI,
 	}
 }
 
@@ -288,7 +304,7 @@ func (e *DeviceKeygen) device() *libkb.Device {
 	return &libkb.Device{
 		ID:          e.args.DeviceID,
 		Description: &e.args.DeviceName,
-		Type:        libkb.DeviceTypeDesktop,
+		Type:        e.args.DeviceType,
 		Status:      &s,
 	}
 }

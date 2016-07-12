@@ -1,8 +1,11 @@
+// Copyright 2015 Keybase, Inc. All rights reserved. Use of
+// this source code is governed by the included BSD license.
+
 package engine
 
 import (
 	"github.com/keybase/client/go/libkb"
-	keybase1 "github.com/keybase/client/protocol/go"
+	keybase1 "github.com/keybase/client/go/protocol"
 )
 
 type UntrackEngineArg struct {
@@ -31,7 +34,7 @@ func (e *UntrackEngine) Name() string {
 
 func (e *UntrackEngine) Prereqs() Prereqs {
 	return Prereqs{
-		Session: true,
+		Device: true,
 	}
 }
 
@@ -120,7 +123,7 @@ func (e *UntrackEngine) loadThem() (them *libkb.User, remoteLink, localLink *lib
 	}
 
 	if uid.IsNil() {
-		res := libkb.ResolveUID(e.arg.Username)
+		res := e.G().Resolver.Resolve(e.arg.Username)
 		if err = res.GetError(); err != nil {
 			return
 		}
@@ -133,7 +136,7 @@ func (e *UntrackEngine) loadThem() (them *libkb.User, remoteLink, localLink *lib
 		}
 	}
 
-	lLink, err := libkb.LocalTrackChainLinkFor(e.arg.Me.GetUID(), uid)
+	lLink, err := libkb.LocalTrackChainLinkFor(e.arg.Me.GetUID(), uid, e.G())
 	if err != nil {
 		return
 	}
@@ -170,7 +173,8 @@ func (e *UntrackEngine) loadThem() (them *libkb.User, remoteLink, localLink *lib
 }
 
 func (e *UntrackEngine) storeLocalUntrack(them *libkb.User) error {
-	return libkb.RemoveLocalTrack(e.arg.Me.GetUID(), them.GetUID())
+	// Also do a removal in case of expiring local tracks
+	return libkb.RemoveLocalTracks(e.arg.Me.GetUID(), them.GetUID(), e.G())
 }
 
 func (e *UntrackEngine) storeRemoteUntrack(them *libkb.User, ctx *Context) (err error) {
@@ -182,7 +186,7 @@ func (e *UntrackEngine) storeRemoteUntrack(them *libkb.User, ctx *Context) (err 
 		KeyType: libkb.DeviceSigningKeyType,
 	}
 	var signingKeyPriv libkb.GenericKey
-	if signingKeyPriv, _, err = e.G().Keyrings.GetSecretKeyWithPrompt(ctx.LoginContext, arg, ctx.SecretUI, "untracking signature"); err != nil {
+	if signingKeyPriv, err = e.G().Keyrings.GetSecretKeyWithPrompt(ctx.SecretKeyPromptArg(arg, "untracking signature")); err != nil {
 		return
 	}
 

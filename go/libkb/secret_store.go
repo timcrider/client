@@ -1,8 +1,9 @@
+// Copyright 2015 Keybase, Inc. All rights reserved. Use of
+// this source code is governed by the included BSD license.
+
 package libkb
 
-import (
-	keybase1 "github.com/keybase/client/protocol/go"
-)
+import keybase1 "github.com/keybase/client/go/protocol"
 
 type SecretRetriever interface {
 	RetrieveSecret() ([]byte, error)
@@ -15,15 +16,45 @@ type SecretStorer interface {
 type SecretStore interface {
 	SecretRetriever
 	SecretStorer
-	ClearSecret() error
 }
 
-// NewSecretStore(username string), HasSecretStore(),
-// GetUsersWithStoredSecrets() ([]string, error), and
-// GetTerminalPrompt() are defined in platform-specific files.
+type SecretStoreAll interface {
+	RetrieveSecret(username NormalizedUsername) ([]byte, error)
+	StoreSecret(username NormalizedUsername, secret []byte) error
+	ClearSecret(username NormalizedUsername) error
+	GetUsersWithStoredSecrets() ([]string, error)
+	GetApprovalPrompt() string
+	GetTerminalPrompt() string
+}
 
-func GetConfiguredAccounts(g *GlobalContext) ([]keybase1.ConfiguredAccount, error) {
-	currentUsername, otherUsernames, err := g.Env.GetConfig().GetAllUsernames()
+type SecretStoreContext interface {
+	GetAllUserNames() (NormalizedUsername, []NormalizedUsername, error)
+	GetStoredSecretServiceName() string
+	GetStoredSecretAccessGroup() string
+}
+
+type SecretStoreImp struct {
+	username NormalizedUsername
+	store    SecretStoreAll
+}
+
+func (s SecretStoreImp) RetrieveSecret() ([]byte, error) {
+	return s.store.RetrieveSecret(s.username)
+}
+
+func (s SecretStoreImp) StoreSecret(secret []byte) error {
+	return s.store.StoreSecret(s.username, secret)
+}
+
+func NewSecretStore(g *GlobalContext, username NormalizedUsername) SecretStore {
+	if g.SecretStoreAll != nil {
+		return SecretStoreImp{username, g.SecretStoreAll}
+	}
+	return nil
+}
+
+func GetConfiguredAccounts(c SecretStoreContext, s SecretStoreAll) ([]keybase1.ConfiguredAccount, error) {
+	currentUsername, otherUsernames, err := c.GetAllUserNames()
 	if err != nil {
 		return nil, err
 	}
@@ -37,8 +68,10 @@ func GetConfiguredAccounts(g *GlobalContext) ([]keybase1.ConfiguredAccount, erro
 			Username: username.String(),
 		}
 	}
-
-	storedSecretUsernames, err := GetUsersWithStoredSecrets()
+	var storedSecretUsernames []string
+	if s != nil {
+		storedSecretUsernames, err = s.GetUsersWithStoredSecrets()
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -60,10 +93,9 @@ func GetConfiguredAccounts(g *GlobalContext) ([]keybase1.ConfiguredAccount, erro
 	return configuredAccounts, nil
 }
 
-func ClearStoredSecret(username NormalizedUsername) error {
-	secretStore := NewSecretStore(username)
-	if secretStore == nil {
+func ClearStoredSecret(g *GlobalContext, username NormalizedUsername) error {
+	if g.SecretStoreAll == nil {
 		return nil
 	}
-	return secretStore.ClearSecret()
+	return g.SecretStoreAll.ClearSecret(username)
 }

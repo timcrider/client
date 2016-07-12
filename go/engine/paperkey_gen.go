@@ -1,3 +1,6 @@
+// Copyright 2015 Keybase, Inc. All rights reserved. Use of
+// this source code is governed by the included BSD license.
+
 package engine
 
 import (
@@ -91,6 +94,15 @@ func (e *PaperKeyGen) Run(ctx *Context) error {
 		return err
 	}
 
+	// no need to notify if key wasn't pushed to server
+	// (e.g. in the case of using this engine to verify a key)
+	if e.arg.SkipPush {
+		return nil
+	}
+	e.G().NotifyRouter.HandleKeyfamilyChanged(e.arg.Me.GetUID())
+	// Remove this after kbfs notification change complete
+	e.G().NotifyRouter.HandleUserChanged(e.arg.Me.GetUID())
+
 	return nil
 }
 
@@ -128,7 +140,7 @@ func (e *PaperKeyGen) makeEncKey(seed []byte) error {
 func (e *PaperKeyGen) getClientHalfFromSecretStore() ([]byte, libkb.PassphraseGeneration, error) {
 	zeroGen := libkb.PassphraseGeneration(0)
 
-	secretStore := libkb.NewSecretStore(e.arg.Me.GetNormalizedName())
+	secretStore := libkb.NewSecretStore(e.G(), e.arg.Me.GetNormalizedName())
 	if secretStore == nil {
 		return nil, zeroGen, errors.New("No secret store available")
 	}
@@ -230,7 +242,11 @@ func (e *PaperKeyGen) push(ctx *Context) error {
 	}
 
 	// post them to the server.
-	if err := libkb.PostDeviceLKS(ctx.LoginContext, backupDev.ID, libkb.DeviceTypePaper, backupLks.GetServerHalf(), backupLks.Generation(), ctext, e.encKey.GetKID()); err != nil {
+	var sr libkb.SessionReader
+	if ctx.LoginContext != nil {
+		sr = ctx.LoginContext.LocalSession()
+	}
+	if err := libkb.PostDeviceLKS(sr, backupDev.ID, libkb.DeviceTypePaper, backupLks.GetServerHalf(), backupLks.Generation(), ctext, e.encKey.GetKID()); err != nil {
 		return err
 	}
 
@@ -242,6 +258,7 @@ func (e *PaperKeyGen) push(ctx *Context) error {
 		ExistingKey:    e.arg.SigningKey,
 		Me:             e.arg.Me,
 		Device:         backupDev,
+		Contextified:   libkb.NewContextified(e.G()),
 	}
 
 	// push the paper encryption key
@@ -252,6 +269,7 @@ func (e *PaperKeyGen) push(ctx *Context) error {
 		ExistingKey:    e.sigKey,
 		Me:             e.arg.Me,
 		Device:         backupDev,
+		Contextified:   libkb.NewContextified(e.G()),
 	}
 
 	return libkb.DelegatorAggregator(ctx.LoginContext, []libkb.Delegator{sigDel, sigEnc})

@@ -1,3 +1,6 @@
+// Copyright 2015 Keybase, Inc. All rights reserved. Use of
+// this source code is governed by the included BSD license.
+
 // ProveCheck looks for an active proof in the logged in user's id
 // table for a service, username pair.
 
@@ -7,7 +10,7 @@ import (
 	"fmt"
 
 	"github.com/keybase/client/go/libkb"
-	keybase1 "github.com/keybase/client/protocol/go"
+	keybase1 "github.com/keybase/client/go/protocol"
 )
 
 // ProveCheck is an engine.

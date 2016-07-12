@@ -1,10 +1,13 @@
+// Copyright 2015 Keybase, Inc. All rights reserved. Use of
+// this source code is governed by the included BSD license.
+
 package libkb
 
 import (
 	"regexp"
 	"strings"
 
-	keybase1 "github.com/keybase/client/protocol/go"
+	keybase1 "github.com/keybase/client/go/protocol"
 	jsonw "github.com/keybase/go-jsonw"
 )
 
@@ -15,6 +18,8 @@ import (
 type HackerNewsChecker struct {
 	proof RemoteProofChainLink
 }
+
+func (h *HackerNewsChecker) GetTorError() ProofError { return nil }
 
 func APIBase(un string) string {
 	return "https://hacker-news.firebaseio.com/v0/user/" + un
@@ -93,19 +98,22 @@ func CheckKarma(un string) (int, error) {
 
 type HackerNewsServiceType struct{ BaseServiceType }
 
-func (t HackerNewsServiceType) AllStringKeys() []string     { return t.BaseAllStringKeys(t) }
-func (t HackerNewsServiceType) PrimaryStringKeys() []string { return t.BasePrimaryStringKeys(t) }
+func (t HackerNewsServiceType) AllStringKeys() []string { return t.BaseAllStringKeys(t) }
 
-func (t HackerNewsServiceType) CheckUsername(s string) (err error) {
-	if regexp.MustCompile(`^@?(?i:[a-z0-9_-]{2,15})$`).MatchString(s) {
-		err = BadUsernameError{s}
+var hackerNewsUsernameRegexp = regexp.MustCompile(`^(?i:[a-z0-9_-]{2,15})$`)
+
+func (t HackerNewsServiceType) NormalizeUsername(s string) (string, error) {
+	if !hackerNewsUsernameRegexp.MatchString(s) {
+		return "", BadUsernameError{s}
 	}
-	return
+	// HackerNews names are case-sensitive
+	return s, nil
 }
 
-// HackerNews names are case-sensitive
-func (t HackerNewsServiceType) NormalizeUsername(s string) (string, error) {
-	return s, nil
+func (t HackerNewsServiceType) NormalizeRemoteName(s string) (string, error) {
+	// Allow a leading '@'.
+	s = strings.TrimPrefix(s, "@")
+	return t.NormalizeUsername(s)
 }
 
 func (t HackerNewsServiceType) ToChecker() Checker {
@@ -128,7 +136,7 @@ following text. Click here: https://news.ycombinator.com/user?id=` + un)
 func (t HackerNewsServiceType) DisplayName(un string) string { return "HackerNews" }
 func (t HackerNewsServiceType) GetTypeName() string          { return "hackernews" }
 
-func (t HackerNewsServiceType) RecheckProofPosting(tryNumber int, status keybase1.ProofStatus) (warning *Markup, err error) {
+func (t HackerNewsServiceType) RecheckProofPosting(tryNumber int, status keybase1.ProofStatus, _ string) (warning *Markup, err error) {
 	warning = FmtMarkup(`<p>We couldn't find a posted proof...<strong>yet</strong></p>`)
 	if tryNumber < 3 {
 		warning.Append(`<p>HackerNews's API is slow to update, so be patient...try again?</p>`)
@@ -163,7 +171,7 @@ func (t HackerNewsServiceType) PreProofCheck(un string) (markup *Markup, err err
 func init() {
 	RegisterServiceType(HackerNewsServiceType{})
 	RegisterSocialNetwork("hackernews")
-	RegisterProofCheckHook("hackernews",
+	RegisterMakeProofCheckerFunc("hackernews",
 		func(l RemoteProofChainLink) (ProofChecker, ProofError) {
 			return NewHackerNewsChecker(l)
 		})

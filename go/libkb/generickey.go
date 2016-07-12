@@ -1,11 +1,13 @@
+// Copyright 2015 Keybase, Inc. All rights reserved. Use of
+// this source code is governed by the included BSD license.
+
 package libkb
 
 import (
 	"fmt"
 	"strings"
 
-	keybase1 "github.com/keybase/client/protocol/go"
-	triplesec "github.com/keybase/go-triplesec"
+	keybase1 "github.com/keybase/client/go/protocol"
 )
 
 type AlgoType int
@@ -36,7 +38,7 @@ type GenericKey interface {
 	// the KID of the key that sent the message (if applicable).
 	DecryptFromString(ciphertext string) (msg []byte, sender keybase1.KID, err error)
 
-	ToServerSKB(gc *GlobalContext, ts *triplesec.Cipher, gen PassphraseGeneration) (*SKB, error)
+	ToServerSKB(gc *GlobalContext, tsec Triplesec, gen PassphraseGeneration) (*SKB, error)
 	ToLksSKB(lks *LKSec) (*SKB, error)
 	VerboseDescription() string
 	CheckSecretKey() error
@@ -58,28 +60,28 @@ func CanEncrypt(key GenericKey) bool {
 	}
 }
 
-func WriteLksSKBToKeyring(k GenericKey, lks *LKSec, lui LogUI, lctx LoginContext) (*SKB, error) {
+func WriteLksSKBToKeyring(g *GlobalContext, k GenericKey, lks *LKSec, lctx LoginContext) (*SKB, error) {
 	skb, err := k.ToLksSKB(lks)
 	if err != nil {
 		return nil, fmt.Errorf("k.ToLksSKB() error: %s", err)
 	}
-	if err := skbPushAndSave(skb, lui, lctx); err != nil {
+	if err := skbPushAndSave(g, skb, lctx); err != nil {
 		return nil, err
 	}
 	return skb, nil
 }
 
-func skbPushAndSave(skb *SKB, lui LogUI, lctx LoginContext) error {
+func skbPushAndSave(g *GlobalContext, skb *SKB, lctx LoginContext) error {
 	if lctx != nil {
 		kr, err := lctx.Keyring()
 		if err != nil {
 			return err
 		}
-		return kr.PushAndSave(skb, lui)
+		return kr.PushAndSave(skb)
 	}
 	var err error
-	kerr := G.LoginState().Keyring(func(ring *SKBKeyringFile) {
-		err = ring.PushAndSave(skb, lui)
+	kerr := g.LoginState().Keyring(func(ring *SKBKeyringFile) {
+		err = ring.PushAndSave(skb)
 	}, "PushAndSave")
 	if kerr != nil {
 		return kerr
@@ -103,15 +105,20 @@ func IsPGP(key GenericKey) bool {
 	return ok
 }
 
-func ParseGenericKey(bundle string) (GenericKey, error) {
+func ParseGenericKey(bundle string) (GenericKey, *Warnings, error) {
 	if isPGPBundle(bundle) {
 		// PGP key
 		return ReadOneKeyFromString(bundle)
 	}
 	// NaCl key
-	return ImportKeypairFromKID(keybase1.KIDFromString(bundle))
+	key, err := ImportKeypairFromKID(keybase1.KIDFromString(bundle))
+	return key, &Warnings{}, err
 }
 
 func isPGPBundle(armored string) bool {
 	return strings.HasPrefix(armored, "-----BEGIN PGP")
+}
+
+func GenericKeyEqual(k1, k2 GenericKey) bool {
+	return k1.GetKID().Equal(k2.GetKID())
 }

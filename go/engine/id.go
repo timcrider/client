@@ -1,31 +1,28 @@
+// Copyright 2015 Keybase, Inc. All rights reserved. Use of
+// this source code is governed by the included BSD license.
+
 package engine
 
 import (
 	"github.com/keybase/client/go/libkb"
-	keybase1 "github.com/keybase/client/protocol/go"
+	keybase1 "github.com/keybase/client/go/protocol"
 )
-
-type IDEngineArg struct {
-	UserAssertion    string
-	TrackStatement   bool // output a track statement
-	ForceRemoteCheck bool // don't use proof cache
-}
 
 type IDRes struct {
 	Outcome           *libkb.IdentifyOutcome
 	User              *libkb.User
-	TrackToken        libkb.IdentifyCacheToken
+	TrackToken        keybase1.TrackToken
 	ComputedKeyFamily *libkb.ComputedKeyFamily
 }
 
-// IDEnginge is the type used by cmd_id Run, daemon id handler.
+// IDEngine is the type used by cmd_id Run, daemon id handler.
 type IDEngine struct {
-	arg *IDEngineArg
+	arg *keybase1.IdentifyArg
 	res *IDRes
 	libkb.Contextified
 }
 
-func NewIDEngine(arg *IDEngineArg, g *libkb.GlobalContext) *IDEngine {
+func NewIDEngine(arg *keybase1.IdentifyArg, g *libkb.GlobalContext) *IDEngine {
 	return &IDEngine{
 		arg:          arg,
 		Contextified: libkb.NewContextified(g),
@@ -37,7 +34,7 @@ func (e *IDEngine) Name() string {
 }
 
 func (e *IDEngine) Prereqs() Prereqs {
-	return Prereqs{Session: e.arg.TrackStatement}
+	return Prereqs{}
 }
 
 func (e *IDEngine) RequiredUIs() []libkb.UIKind {
@@ -63,68 +60,35 @@ func (e *IDEngine) Result() *IDRes {
 }
 
 func (e *IDEngine) run(ctx *Context) (*IDRes, error) {
-	iarg := NewIdentifyArg(e.arg.UserAssertion, e.arg.TrackStatement, e.arg.ForceRemoteCheck)
+	iarg := NewIdentifyArg(e.arg.UserAssertion, false, e.arg.ForceRemoteCheck)
+	iarg.Source = e.arg.Source
 	ieng := NewIdentify(iarg, e.G())
 	if err := RunEngine(ieng, ctx); err != nil {
 		return nil, err
 	}
+
 	user := ieng.User()
 	res := &IDRes{Outcome: ieng.Outcome(), User: user, TrackToken: ieng.TrackToken(), ComputedKeyFamily: user.GetComputedKeyFamily()}
+	res.Outcome.Reason = e.arg.Reason
 
-	if !e.arg.TrackStatement {
-		ctx.IdentifyUI.Finish()
+	if ieng.DidShortCircuit() {
 		return res, nil
 	}
 
-	// they want a json tracking statement:
-
-	// check to make sure they aren't identifying themselves
-	me, err := libkb.LoadMe(libkb.NewLoadUserArg(e.G()))
-	if err != nil {
-		return nil, err
-	}
-	if me.Equal(user) {
-		e.G().Log.Warning("can't generate track statement on yourself")
-		// but let's not call this an error...they'll see the warning.
-		ctx.IdentifyUI.Finish()
-		return res, nil
-	}
-
-	stmt, err := me.TrackStatementJSON(user, ieng.Outcome())
-	if err != nil {
-		e.G().Log.Warning("error getting track statement: %s", err)
-		return nil, err
-	}
-
-	if err = ctx.IdentifyUI.DisplayTrackStatement(stmt); err != nil {
+	// need to tell any ui clients the track token
+	if err := ctx.IdentifyUI.ReportTrackToken(ieng.TrackToken()); err != nil {
 		return nil, err
 	}
 
 	ctx.IdentifyUI.Finish()
-
 	return res, nil
-}
-
-func (a IDEngineArg) Export() (res keybase1.IdentifyArg) {
-	return keybase1.IdentifyArg{
-		UserAssertion:  a.UserAssertion,
-		TrackStatement: a.TrackStatement,
-	}
-}
-
-func ImportIDEngineArg(a keybase1.IdentifyArg) (ret IDEngineArg) {
-	return IDEngineArg{
-		UserAssertion:    a.UserAssertion,
-		TrackStatement:   a.TrackStatement,
-		ForceRemoteCheck: a.ForceRemoteCheck,
-	}
 }
 
 func (ir *IDRes) Export() *keybase1.IdentifyRes {
 	return &keybase1.IdentifyRes{
 		Outcome:    *((*ir.Outcome).Export()),
 		User:       ir.User.Export(),
-		TrackToken: ir.TrackToken.Export(),
+		TrackToken: ir.TrackToken,
 		PublicKeys: ir.ComputedKeyFamily.Export(),
 	}
 }

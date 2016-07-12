@@ -1,10 +1,13 @@
+// Copyright 2015 Keybase, Inc. All rights reserved. Use of
+// this source code is governed by the included BSD license.
+
 package engine
 
 import (
 	"testing"
 
 	"github.com/keybase/client/go/libkb"
-	keybase1 "github.com/keybase/client/protocol/go"
+	keybase1 "github.com/keybase/client/go/protocol"
 )
 
 func runUntrack(g *libkb.GlobalContext, fu *FakeUser, username string) error {
@@ -37,7 +40,7 @@ func assertUntracked(tc libkb.TestContext, username string) {
 		tc.T.Fatal("expected not to get a tracking statement; but got one")
 	}
 
-	s, err = libkb.LocalTrackChainLinkFor(me.GetUID(), them.GetUID())
+	s, err = libkb.LocalTrackChainLinkFor(me.GetUID(), them.GetUID(), tc.G)
 	if err != nil {
 		tc.T.Fatal(err)
 	}

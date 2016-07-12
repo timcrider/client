@@ -1,134 +1,162 @@
+// Copyright 2015 Keybase, Inc. All rights reserved. Use of
+// this source code is governed by the included BSD license.
+
+// This is the main login engine.
+
 package engine
 
 import (
-	"sync"
+	"errors"
 
 	"github.com/keybase/client/go/libkb"
+	keybase1 "github.com/keybase/client/go/protocol"
 )
 
-type LoginEngine struct {
+var errNoConfig = errors.New("No user config available")
+var errNoDevice = errors.New("No device provisioned locally for this user")
+
+// Login is an engine.
+type Login struct {
 	libkb.Contextified
-	requiredUIs   []libkb.UIKind
-	runFn         func(*libkb.LoginState, *Context) error
-	user          *libkb.User
-	SkipLocksmith bool
-	locksmithMu   sync.Mutex
-	locksmith     *Locksmith
+	deviceType      string
+	usernameOrEmail string
+	clientType      keybase1.ClientType
 }
 
-func NewLoginWithPromptEngine(username string, gc *libkb.GlobalContext) *LoginEngine {
-	eng := &LoginEngine{
-		requiredUIs: []libkb.UIKind{
-			libkb.LoginUIKind,
-			libkb.SecretUIKind,
-			libkb.LogUIKind,
-		},
-		Contextified: libkb.NewContextified(gc),
+// NewLogin creates a Login engine.  username is optional.
+// deviceType should be libkb.DeviceTypeDesktop or
+// libkb.DeviceTypeMobile.
+func NewLogin(g *libkb.GlobalContext, deviceType string, usernameOrEmail string, ct keybase1.ClientType) *Login {
+	return &Login{
+		Contextified:    libkb.NewContextified(g),
+		deviceType:      deviceType,
+		usernameOrEmail: usernameOrEmail,
+		clientType:      ct,
 	}
-	eng.runFn = func(loginState *libkb.LoginState, ctx *Context) error {
-		after := func(lctx libkb.LoginContext) error {
-			return eng.postLogin(ctx, lctx)
-		}
-		return loginState.LoginWithPrompt(username, ctx.LoginUI, ctx.SecretUI, after)
-	}
-	return eng
 }
 
-func NewLoginWithPromptEngineSkipLocksmith(username string, gc *libkb.GlobalContext) *LoginEngine {
-	eng := NewLoginWithPromptEngine(username, gc)
-	eng.SkipLocksmith = true
-	return eng
-}
-
-func NewLoginWithStoredSecretEngine(username string, gc *libkb.GlobalContext) *LoginEngine {
-	eng := &LoginEngine{Contextified: libkb.NewContextified(gc)}
-	eng.runFn = func(loginState *libkb.LoginState, ctx *Context) error {
-		after := func(lctx libkb.LoginContext) error {
-			return eng.postLogin(ctx, lctx)
-		}
-		return loginState.LoginWithStoredSecret(username, after)
-	}
-
-	return eng
-}
-
-func NewLoginWithPassphraseEngine(username, passphrase string, storeSecret bool, gc *libkb.GlobalContext) *LoginEngine {
-	eng := &LoginEngine{Contextified: libkb.NewContextified(gc)}
-	eng.runFn = func(loginState *libkb.LoginState, ctx *Context) error {
-		after := func(lctx libkb.LoginContext) error {
-			return eng.postLogin(ctx, lctx)
-		}
-		return loginState.LoginWithPassphrase(username, passphrase, storeSecret, after)
-	}
-
-	return eng
-}
-
-func (e *LoginEngine) Name() string {
+// Name is the unique engine name.
+func (e *Login) Name() string {
 	return "Login"
 }
 
-func (e *LoginEngine) Prereqs() Prereqs { return Prereqs{} }
-
-func (e *LoginEngine) RequiredUIs() []libkb.UIKind {
-	return e.requiredUIs
+// GetPrereqs returns the engine prereqs.
+func (e *Login) Prereqs() Prereqs {
+	return Prereqs{}
 }
 
-func (e *LoginEngine) SubConsumers() []libkb.UIConsumer {
+// RequiredUIs returns the required UIs.
+func (e *Login) RequiredUIs() []libkb.UIKind {
+	return []libkb.UIKind{}
+}
+
+// SubConsumers returns the other UI consumers for this engine.
+func (e *Login) SubConsumers() []libkb.UIConsumer {
 	return []libkb.UIConsumer{
-		&Locksmith{},
+		&loginProvisionedDevice{},
+		&loginLoadUser{},
+		&loginProvision{},
 	}
 }
 
-func (e *LoginEngine) Run(ctx *Context) error {
-	return e.runFn(e.G().LoginState(), ctx)
-}
+// Run starts the engine.
+func (e *Login) Run(ctx *Context) error {
+	if len(e.usernameOrEmail) > 0 && libkb.CheckEmail.F(e.usernameOrEmail) {
+		// If e.usernameOrEmail is provided and it is an email address, then
+		// loginProvisionedDevice is pointless.  It would return an error,
+		// but might as well not even use it.
+		e.G().Log.Debug("skipping loginProvisionedDevice since %q provided to Login, which looks like an email address.", e.usernameOrEmail)
+	} else {
+		// First see if this device is already provisioned and it is possible to log in.
+		eng := newLoginProvisionedDevice(e.G(), e.usernameOrEmail)
+		err := RunEngine(eng, ctx)
+		if err == nil {
+			// login successful
+			e.G().Log.Debug("LoginProvisionedDevice.Run() was successful")
+			e.sendNotification()
+			return nil
+		}
 
-func (e *LoginEngine) postLogin(ctx *Context, lctx libkb.LoginContext) error {
-	// We might need to ID ourselves, so load us in here
-	var err error
-	arg := libkb.NewLoadUserForceArg(e.G())
-	arg.LoginContext = lctx
-	e.user, err = libkb.LoadMe(arg)
-	if err != nil {
-		_, ok := err.(libkb.NoKeyError)
-		if !ok {
+		// if this device has been provisioned already and there was an error, then
+		// return that error.  Otherwise, ignore it and keep going.
+		if !e.notProvisionedErr(err) {
 			return err
 		}
+
+		e.G().Log.Debug("loginProvisionedDevice error: %s (continuing with device provisioning...)", err)
 	}
 
-	if e.SkipLocksmith {
-		ctx.LogUI.Debug("skipping locksmith as requested by LoginArg")
-		return nil
-	}
+	e.G().Log.Debug("attempting device provisioning")
 
-	// create a locksmith engine to check the account
-	ctx.LoginContext = lctx
-	larg := &LocksmithArg{
-		User: e.user,
-	}
-	e.locksmith = NewLocksmith(larg, e.G())
-	err = e.locksmith.LoginCheckup(ctx, e.user)
+	// clear out any existing session:
+	e.G().Logout()
+
+	// transaction around config file
+	tx, err := e.G().Env.GetConfigWriter().BeginTransaction()
 	if err != nil {
 		return err
 	}
 
-	lctx.LocalSession().SetDeviceProvisioned(e.G().Env.GetDeviceID())
+	// From this point on, if there's an error, we abort the
+	// transaction.
+	defer func() {
+		if tx != nil {
+			tx.Abort()
+		}
+	}()
 
-	return nil
-
-}
-
-func (e *LoginEngine) User() *libkb.User {
-	return e.user
-}
-
-func (e *LoginEngine) Cancel() error {
-	e.locksmithMu.Lock()
-	defer e.locksmithMu.Unlock()
-	if e.locksmith == nil {
-		return nil
+	// run the LoginLoadUser sub-engine to load a user
+	ueng := newLoginLoadUser(e.G(), e.usernameOrEmail)
+	if err = RunEngine(ueng, ctx); err != nil {
+		return err
 	}
 
-	return e.locksmith.Cancel()
+	// make sure the user isn't already provisioned (can
+	// get here if usernameOrEmail is an email address
+	// for an already provisioned on this device user).
+	if ueng.User().HasCurrentDeviceInCurrentInstall() {
+		return libkb.DeviceAlreadyProvisionedError{}
+	}
+
+	darg := &loginProvisionArg{
+		DeviceType: e.deviceType,
+		ClientType: e.clientType,
+		User:       ueng.User(),
+	}
+	deng := newLoginProvision(e.G(), darg)
+	if err = RunEngine(deng, ctx); err != nil {
+		return err
+	}
+
+	// commit the config changes
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+
+	// Zero out the TX so that we don't abort it in the defer()
+	// exit.
+	tx = nil
+
+	e.sendNotification()
+	return nil
+}
+
+// notProvisionedErr will return true if err signifies that login
+// failed because this device has not yet been provisioned.
+func (e *Login) notProvisionedErr(err error) bool {
+	if err == errNoDevice {
+		return true
+	}
+	if err == errNoConfig {
+		return true
+	}
+
+	e.G().Log.Debug("notProvisioned, not handling error %s (err type: %T)", err, err)
+
+	return false
+}
+
+func (e *Login) sendNotification() {
+	e.G().NotifyRouter.HandleLogin(string(e.G().Env.GetUsername()))
+	e.G().CallLoginHooks()
 }

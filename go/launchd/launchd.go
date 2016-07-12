@@ -1,3 +1,8 @@
+// Copyright 2015 Keybase, Inc. All rights reserved. Use of
+// this source code is governed by the included BSD license.
+
+// +build darwin
+
 package launchd
 
 import (
@@ -11,120 +16,241 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/keybase/client/go/libkb"
 )
 
-var log = libkb.G.Log
-
 // Service defines a service
 type Service struct {
 	label string
+	log   Log
 }
 
 // NewService constructs a launchd service.
 func NewService(label string) Service {
 	return Service{
 		label: label,
+		log:   emptyLog{},
+	}
+}
+
+// SetLogger sets the logger
+func (s *Service) SetLogger(log Log) {
+	if log != nil {
+		s.log = log
+	} else {
+		s.log = emptyLog{}
 	}
 }
 
 // Label for service
 func (s Service) Label() string { return s.label }
 
+// EnvVar defines and environment variable for the Plist
+type EnvVar struct {
+	key   string
+	value string
+}
+
+// NewEnvVar creates a new environment variable
+func NewEnvVar(key string, value string) EnvVar {
+	return EnvVar{key, value}
+}
+
 // Plist defines a launchd plist
 type Plist struct {
-	label      string
-	binPath    string
-	args       []string
-	envVars    map[string]string
-	workingDir string
+	label     string
+	binPath   string
+	args      []string
+	envVars   []EnvVar
+	keepAlive bool
+	logPath   string
+	comment   string
 }
 
-// NewPlist constructs a launchd service.
-func NewPlist(label string, binPath string, args []string, envVars map[string]string, workingDir string) Plist {
+// NewPlist constructs a launchd service plist
+func NewPlist(label string, binPath string, args []string, envVars []EnvVar, logPath string, comment string) Plist {
 	return Plist{
-		label:      label,
-		binPath:    binPath,
-		args:       args,
-		envVars:    envVars,
-		workingDir: workingDir,
+		label:     label,
+		binPath:   binPath,
+		args:      args,
+		envVars:   envVars,
+		keepAlive: true,
+		logPath:   logPath,
+		comment:   comment,
 	}
 }
 
-// Load will load the service.
-// If restart=true, then we'll unload it first.
-func (s Service) Load(restart bool) error {
-	// Unload first if we're forcing
-	plistDest := s.plistDestination()
-	if restart {
-		exec.Command("/bin/launchctl", "unload", plistDest).Output()
+// Start will start the service.
+func (s Service) Start(wait time.Duration) error {
+	if !s.HasPlist() {
+		return fmt.Errorf("No service (plist) installed with label: %s", s.label)
 	}
-	log.Info("Loading %s", s.label)
-	_, err := exec.Command("/bin/launchctl", "load", "-w", plistDest).Output()
+
+	plistDest := s.plistDestination()
+	s.log.Info("Starting %s", s.label)
+	// We start using load -w on plist file
+	output, err := exec.Command("/bin/launchctl", "load", "-w", plistDest).CombinedOutput()
+	s.log.Debug("Output (launchctl load): %s", string(output))
+
+	if wait > 0 {
+		status, waitErr := s.WaitForStatus(wait, 500*time.Millisecond)
+		if waitErr != nil {
+			return waitErr
+		}
+		if status != nil {
+			s.log.Debug("Service status: %#v", status)
+		}
+	}
 	return err
 }
 
-// Unload will unload the service
-func (s Service) Unload() error {
+// HasPlist returns true if service has plist installed
+func (s Service) HasPlist() bool {
 	plistDest := s.plistDestination()
-	log.Info("Unloading %s", s.label)
-	_, err := exec.Command("/bin/launchctl", "unload", plistDest).Output()
+	if _, err := os.Stat(plistDest); err == nil {
+		return true
+	}
+	return false
+}
+
+// Stop a service.
+func (s Service) Stop(wait time.Duration) error {
+	s.log.Info("Stopping %s", s.label)
+	// We stop by removing the job. This works for non-demand and demand jobs.
+	output, err := exec.Command("/bin/launchctl", "remove", s.label).CombinedOutput()
+	s.log.Debug("Output (launchctl remove): %s", string(output))
+	if wait > 0 {
+		// The docs say launchd ExitTimeOut defaults to 20 seconds, but in practice
+		// it seems more like 5 seconds before it resorts to a SIGKILL.
+		// Because of the SIGKILL fallback we can use a large timeout here of 25
+		// seconds, which we'll likely never reach unless the process is zombied.
+		err = s.WaitForExit(wait)
+		if err != nil {
+			return err
+		}
+	}
 	return err
+}
+
+// Restart a service.
+func (s Service) Restart(wait time.Duration) error {
+	return Restart(s.Label(), wait, s.log)
+}
+
+// WaitForStatus waits for service status to be available
+func (s Service) WaitForStatus(wait time.Duration, delay time.Duration) (*ServiceStatus, error) {
+	t := time.Now()
+	i := 1
+	for time.Now().Sub(t) < wait {
+		status, err := s.LoadStatus()
+		if err != nil {
+			return nil, err
+		}
+		if status != nil && status.HasRun() {
+			return status, nil
+		}
+		// Tell user we're waiting for status after 4 seconds, every 4 seconds
+		if i%4 == 0 {
+			s.log.Info("Waiting for %s to be loaded...", s.label)
+		}
+		time.Sleep(delay)
+		i++
+	}
+	return nil, nil
+}
+
+// WaitForExit waits for service to exit
+func (s Service) WaitForExit(wait time.Duration) error {
+	running := true
+	t := time.Now()
+	i := 1
+	for time.Now().Sub(t) < wait {
+		status, err := s.LoadStatus()
+		if err != nil {
+			return err
+		}
+		if status == nil || !status.IsRunning() {
+			running = false
+			break
+		}
+		// Tell user we're waiting for exit after 4 seconds, every 4 seconds
+		if i%4 == 0 {
+			s.log.Info("Waiting for %s to exit...", s.label)
+		}
+		time.Sleep(time.Second)
+		i++
+	}
+	if running {
+		return fmt.Errorf("Waiting for service exit timed out")
+	}
+	return nil
 }
 
 // Install will install the launchd service
-func (s Service) Install(p Plist) (err error) {
-	if _, err := os.Stat(p.binPath); os.IsNotExist(err) {
+func (s Service) Install(p Plist, wait time.Duration) error {
+	plistDest := s.plistDestination()
+	return s.install(p, plistDest, wait)
+}
+
+func (s Service) install(p Plist, plistDest string, wait time.Duration) error {
+	if _, ferr := os.Stat(p.binPath); os.IsNotExist(ferr) {
+		return fmt.Errorf("%s doesn't exist", p.binPath)
+	}
+	plist := p.plistXML()
+
+	// See GH issue: https://github.com/keybase/client/pull/1399#issuecomment-164810645
+	if err := libkb.MakeParentDirs(plistDest); err != nil {
 		return err
 	}
-	plist := p.plist()
-	plistDest := s.plistDestination()
 
-	log.Info("Saving %s", plistDest)
+	s.log.Info("Saving %s", plistDest)
 	file := libkb.NewFile(plistDest, []byte(plist), 0644)
-	err = file.Save()
-	if err != nil {
-		return
+	if err := file.Save(); err != nil {
+		return err
 	}
 
-	err = s.Load(true)
-	return
+	return s.Start(wait)
 }
 
 // Uninstall will uninstall the launchd service
-func (s Service) Uninstall() (err error) {
-	err = s.Unload()
-	if err != nil {
-		return
+func (s Service) Uninstall(wait time.Duration) error {
+	if err := s.Stop(wait); err != nil {
+		return err
 	}
 
 	plistDest := s.plistDestination()
 	if _, err := os.Stat(plistDest); err == nil {
-		log.Info("Removing %s", plistDest)
-		err = os.Remove(plistDest)
+		s.log.Info("Removing %s", plistDest)
+		return os.Remove(plistDest)
 	}
-	return
+	return nil
 }
 
-// ListServices will return service with label containing the filter string.
-func ListServices(filter string) ([]Service, error) {
-	files, err := ioutil.ReadDir(launchAgentDir())
-	if err != nil {
-		return nil, err
+// ListServices will return service with label that starts with a filter string.
+func ListServices(filters []string) (services []Service, err error) {
+	launchAgentDir := launchAgentDir()
+	if _, derr := os.Stat(launchAgentDir); os.IsNotExist(derr) {
+		return
 	}
-	var services []Service
+	files, err := ioutil.ReadDir(launchAgentDir)
+	if err != nil {
+		return
+	}
 	for _, f := range files {
-		name := f.Name()
+		fileName := f.Name()
 		suffix := ".plist"
 		// We care about services that contain the filter word and end in .plist
-		if strings.Contains(name, filter) && strings.HasSuffix(name, suffix) {
-			label := name[0 : len(name)-len(suffix)]
-			service := NewService(label)
-			services = append(services, service)
+		for _, filter := range filters {
+			if strings.HasPrefix(fileName, filter) && strings.HasSuffix(fileName, suffix) {
+				label := fileName[0 : len(fileName)-len(suffix)]
+				service := NewService(label)
+				services = append(services, service)
+			}
 		}
 	}
-	return services, nil
+	return
 }
 
 // ServiceStatus defines status for a service
@@ -139,6 +265,14 @@ func (s ServiceStatus) Label() string { return s.label }
 
 // Pid for status (empty string if not running)
 func (s ServiceStatus) Pid() string { return s.pid }
+
+// LastExitStatus will be blank if pid > 0, or a number "123"
+func (s ServiceStatus) LastExitStatus() string { return s.lastExitStatus }
+
+// HasRun returns true if service is running, or has run and failed
+func (s ServiceStatus) HasRun() bool {
+	return s.Pid() != "" || s.LastExitStatus() != "0"
+}
 
 // Description returns service status info
 func (s ServiceStatus) Description() string {
@@ -163,15 +297,18 @@ func (s ServiceStatus) IsRunning() bool {
 
 // StatusDescription returns the service status description
 func (s Service) StatusDescription() string {
-	status, err := s.Status()
+	status, err := s.LoadStatus()
+	if status == nil {
+		return fmt.Sprintf("%s: Not Running", s.label)
+	}
 	if err != nil {
 		return fmt.Sprintf("%s: %v", s.label, err)
 	}
 	return fmt.Sprintf("%s: %s", s.label, status.Description())
 }
 
-// Status returns service status
-func (s Service) Status() (*ServiceStatus, error) {
+// LoadStatus returns service status
+func (s Service) LoadStatus() (*ServiceStatus, error) {
 	out, err := exec.Command("/bin/launchctl", "list").Output()
 	if err != nil {
 		return nil, err
@@ -208,78 +345,84 @@ func (s Service) Status() (*ServiceStatus, error) {
 	return nil, nil
 }
 
-// ShowServices ouputs keybase service info
-func ShowServices(filter string) (err error) {
-	services, err := ListServices(filter)
-	if err != nil {
-		return
-	}
-	if len(services) > 0 {
-		log.Info("Found %s:", libkb.Pluralize(len(services), "service", "services"))
-		for _, service := range services {
-			log.Info(service.StatusDescription())
-		}
-	} else {
-		log.Info("No services")
-	}
-	return
+// CheckPlist returns false, if the plist destination doesn't match what we
+// would install. This means the plist is old and we need to update it.
+func (s Service) CheckPlist(plist Plist) (bool, error) {
+	plistDest := s.plistDestination()
+	return plist.Check(plistDest)
 }
 
 // Install will install a service
-func Install(plist Plist) (err error) {
+func Install(plist Plist, wait time.Duration, log Log) error {
 	service := NewService(plist.label)
-
-	if plist.workingDir != "" {
-		err := ensureDirectoryExists(plist.workingDir)
-		if err != nil {
-			return err
-		}
-	}
-
-	return service.Install(plist)
+	service.SetLogger(log)
+	return service.Install(plist, wait)
 }
 
-// Uninstall will uninstall a keybase service
-func Uninstall(label string) error {
+// Uninstall will uninstall a service
+func Uninstall(label string, wait time.Duration, log Log) error {
 	service := NewService(label)
-	return service.Uninstall()
+	service.SetLogger(log)
+	return service.Uninstall(wait)
 }
 
-// Start will start a keybase service
-func Start(label string) error {
+// Start will start a service
+func Start(label string, wait time.Duration, log Log) error {
 	service := NewService(label)
-	return service.Load(false)
+	service.SetLogger(log)
+	return service.Start(wait)
 }
 
-// Stop will stop a keybase service
-func Stop(label string) error {
+// Stop will stop a service
+func Stop(label string, wait time.Duration, log Log) error {
 	service := NewService(label)
-	return service.Unload()
+	service.SetLogger(log)
+	return service.Stop(wait)
 }
 
 // ShowStatus shows status info for a service
-func ShowStatus(label string) error {
+func ShowStatus(label string, log Log) error {
 	service := NewService(label)
-	status, err := service.Status()
+	service.SetLogger(log)
+	status, err := service.LoadStatus()
 	if err != nil {
 		return err
 	}
-	log.Info(status.Description())
+	if status != nil {
+		log.Info("%s", status.Description())
+	} else {
+		log.Info("No service found with label: %s", label)
+	}
 	return nil
 }
 
 // Restart restarts a service
-func Restart(label string) error {
+func Restart(label string, wait time.Duration, log Log) error {
 	service := NewService(label)
-	return service.Load(true)
+	service.SetLogger(log)
+	err := service.Stop(wait)
+	if err != nil {
+		return err
+	}
+	return service.Start(wait)
 }
 
 func launchAgentDir() string {
 	return filepath.Join(launchdHomeDir(), "Library", "LaunchAgents")
 }
 
+// PlistDestination is the plist path for a label
+func PlistDestination(label string) string {
+	return filepath.Join(launchAgentDir(), label+".plist")
+}
+
+// PlistDestination is the service plist path
+func (s Service) PlistDestination() string {
+	return s.plistDestination()
+}
+
 func (s Service) plistDestination() string {
-	return filepath.Join(launchAgentDir(), s.label+".plist")
+	return PlistDestination(s.label)
 }
 
 func launchdHomeDir() string {
@@ -290,10 +433,6 @@ func launchdHomeDir() string {
 	return currentUser.HomeDir
 }
 
-func launchdLogDir() string {
-	return filepath.Join(launchdHomeDir(), "Library", "Logs")
-}
-
 func ensureDirectoryExists(dir string) error {
 	if _, err := os.Stat(dir); os.IsNotExist(err) {
 		err = os.MkdirAll(dir, 0700)
@@ -302,28 +441,64 @@ func ensureDirectoryExists(dir string) error {
 	return nil
 }
 
-// TODO Use go-plist library
-func (p Plist) plist() string {
-	logFile := filepath.Join(launchdLogDir(), p.label+".log")
+// Check if plist matches plist at path
+func (p Plist) Check(path string) (bool, error) {
+	if p.binPath == "" {
+		return false, fmt.Errorf("Invalid ProgramArguments")
+	}
 
+	// If path doesn't exist, we don't match
+	if _, err := os.Stat(path); os.IsNotExist(err) {
+		return false, nil
+	}
+
+	buf, err := ioutil.ReadFile(path)
+	if err != nil {
+		return false, err
+	}
+
+	plistXML := p.plistXML()
+	if string(buf) == plistXML {
+		return true, nil
+	}
+
+	return false, nil
+}
+
+// TODO Use go-plist library
+func (p Plist) plistXML() string {
 	encodeTag := func(name, val string) string {
 		return fmt.Sprintf("<%s>%s</%s>", name, val, name)
 	}
 
+	encodeBool := func(val bool) string {
+		sval := "false"
+		if val {
+			sval = "true"
+		}
+		return fmt.Sprintf("<%s/>", sval)
+	}
+
 	pargs := []string{}
-	// First arg is the keybase executable
+	// First arg is the executable
 	pargs = append(pargs, encodeTag("string", p.binPath))
 	for _, arg := range p.args {
 		pargs = append(pargs, encodeTag("string", arg))
 	}
 
 	envVars := []string{}
-	for key, value := range p.envVars {
-		envVars = append(envVars, encodeTag("key", key))
-		envVars = append(envVars, encodeTag("string", value))
+	for _, envVar := range p.envVars {
+		envVars = append(envVars, encodeTag("key", envVar.key))
+		envVars = append(envVars, encodeTag("string", envVar.value))
 	}
 
-	return `<?xml version="1.0" encoding="UTF-8"?>
+	options := []string{}
+	if p.keepAlive {
+		options = append(options, encodeTag("key", "KeepAlive"), encodeBool(true))
+		options = append(options, encodeTag("key", "RunAtLoad"), encodeBool(true))
+	}
+
+	xml := `<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
@@ -334,17 +509,32 @@ func (p Plist) plist() string {
   </dict>
   <key>ProgramArguments</key>
   <array>` + "\n    " + strings.Join(pargs, "\n    ") + `
-  </array>
-  <key>KeepAlive</key>
-  <true/>
-  <key>RunAtLoad</key>
-  <true/>
-  <key>WorkingDirectory</key>
-  <string>` + p.workingDir + `</string>
+  </array>` +
+		"\n  " + strings.Join(options, "\n  ") + `
   <key>StandardErrorPath</key>
-  <string>` + logFile + `</string>
+  <string>` + p.logPath + `</string>
   <key>StandardOutPath</key>
-  <string>` + logFile + `</string>
+  <string>` + p.logPath + `</string>
+  <key>WorkingDirectory</key>
+  <string>/tmp</string>
 </dict>
-</plist>`
+</plist>
+`
+
+	if p.comment != "" {
+		xml = fmt.Sprintf("<!-- %s -->\n%s", p.comment, xml)
+	}
+
+	return xml
 }
+
+// Log is the logging interface for this package
+type Log interface {
+	Debug(s string, args ...interface{})
+	Info(s string, args ...interface{})
+}
+
+type emptyLog struct{}
+
+func (l emptyLog) Debug(s string, args ...interface{}) {}
+func (l emptyLog) Info(s string, args ...interface{})  {}

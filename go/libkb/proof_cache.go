@@ -1,3 +1,6 @@
+// Copyright 2015 Keybase, Inc. All rights reserved. Use of
+// this source code is governed by the included BSD license.
+
 package libkb
 
 import (
@@ -5,11 +8,12 @@ import (
 	"time"
 
 	lru "github.com/hashicorp/golang-lru"
-	keybase1 "github.com/keybase/client/protocol/go"
+	keybase1 "github.com/keybase/client/go/protocol"
 	jsonw "github.com/keybase/go-jsonw"
 )
 
 type CheckResult struct {
+	Contextified
 	Status ProofError // Or nil if it was a success
 	Time   time.Time  // When the last check was
 }
@@ -26,31 +30,37 @@ func (cr CheckResult) Pack() *jsonw.Wrapper {
 	return p
 }
 
-func (cr CheckResult) ToDisplayString() string {
-	return "[cached " + FormatTime(cr.Time) + "]"
-}
-
-func (cr CheckResult) IsFresh() bool {
-	// XXX  Might also want two separate timeouts for no error and hard failures.
-
-	var interval time.Duration
-	if cr.Status == nil {
-		interval = G.Env.GetProofCacheLongDur()
-	} else if ProofErrorIsSoft(cr.Status) {
+func (cr CheckResult) Freshness() keybase1.CheckResultFreshness {
+	now := cr.G().Clock().Now()
+	age := now.Sub(cr.Time)
+	switch {
+	case cr.Status == nil:
+		switch {
+		case age < cr.G().Env.GetProofCacheMediumDur():
+			return keybase1.CheckResultFreshness_FRESH
+		case age < cr.G().Env.GetProofCacheLongDur():
+			return keybase1.CheckResultFreshness_AGED
+		}
+	case !ProofErrorIsSoft(cr.Status):
+		if age < cr.G().Env.GetProofCacheShortDur() {
+			return keybase1.CheckResultFreshness_FRESH
+		}
+	default:
 		// don't use cache results for "soft" errors (500s, timeouts)
 		// see issue #140
-		return false
-	} else {
-		interval = G.Env.GetProofCacheMediumDur()
 	}
-	return (time.Since(cr.Time) < interval)
+	return keybase1.CheckResultFreshness_RANCID
 }
 
-func NewNowCheckResult(pe ProofError) *CheckResult {
-	return &CheckResult{pe, time.Now()}
+func NewNowCheckResult(g *GlobalContext, pe ProofError) *CheckResult {
+	return &CheckResult{
+		Contextified: NewContextified(g),
+		Status:       pe,
+		Time:         g.Clock().Now(),
+	}
 }
 
-func NewCheckResult(jw *jsonw.Wrapper) (res *CheckResult, err error) {
+func NewCheckResult(g *GlobalContext, jw *jsonw.Wrapper) (res *CheckResult, err error) {
 	var t int64
 	var code int
 	var desc string
@@ -66,21 +76,23 @@ func NewCheckResult(jw *jsonw.Wrapper) (res *CheckResult, err error) {
 	}
 	if err == nil {
 		res = &CheckResult{
-			Status: pe,
-			Time:   time.Unix(t, 0),
+			Contextified: NewContextified(g),
+			Status:       pe,
+			Time:         time.Unix(t, 0),
 		}
 	}
 	return
 }
 
 type ProofCache struct {
+	Contextified
 	capac int
 	lru   *lru.Cache
 	sync.RWMutex
 }
 
-func NewProofCache(capac int) *ProofCache {
-	return &ProofCache{capac: capac}
+func NewProofCache(g *GlobalContext, capac int) *ProofCache {
+	return &ProofCache{Contextified: NewContextified(g), capac: capac}
 }
 
 func (pc *ProofCache) setup() error {
@@ -111,10 +123,10 @@ func (pc *ProofCache) memGet(sid keybase1.SigID) *CheckResult {
 	}
 	cr, ok := tmp.(CheckResult)
 	if !ok {
-		G.Log.Errorf("Bad type assertion in ProofCache.Get")
+		pc.G().Log.Errorf("Bad type assertion in ProofCache.Get")
 		return nil
 	}
-	if !cr.IsFresh() {
+	if cr.Freshness() == keybase1.CheckResultFreshness_RANCID {
 		pc.lru.Remove(sid)
 		return nil
 	}
@@ -153,30 +165,30 @@ func (pc *ProofCache) dbKey(sid keybase1.SigID) (DbKey, string) {
 func (pc *ProofCache) dbGet(sid keybase1.SigID) (cr *CheckResult) {
 	dbkey, sidstr := pc.dbKey(sid)
 
-	G.Log.Debug("+ ProofCache.dbGet(%s)", sidstr)
-	defer G.Log.Debug("- ProofCache.dbGet(%s) -> %v", sidstr, (cr != nil))
+	pc.G().Log.Debug("+ ProofCache.dbGet(%s)", sidstr)
+	defer pc.G().Log.Debug("- ProofCache.dbGet(%s) -> %v", sidstr, (cr != nil))
 
-	jw, err := G.LocalDb.Get(dbkey)
+	jw, err := pc.G().LocalDb.Get(dbkey)
 	if err != nil {
-		G.Log.Errorf("Error lookup up proof check in DB: %s", err)
+		pc.G().Log.Errorf("Error lookup up proof check in DB: %s", err)
 		return nil
 	}
 	if jw == nil {
-		G.Log.Debug("| Cached CheckResult for %s wasn't found ", sidstr)
+		pc.G().Log.Debug("| Cached CheckResult for %s wasn't found ", sidstr)
 		return nil
 	}
 
-	cr, err = NewCheckResult(jw)
+	cr, err = NewCheckResult(pc.G(), jw)
 	if err != nil {
-		G.Log.Errorf("Bad cached CheckResult for %s", sidstr)
+		pc.G().Log.Errorf("Bad cached CheckResult for %s", sidstr)
 		return nil
 	}
 
-	if !cr.IsFresh() {
-		if err := G.LocalDb.Delete(dbkey); err != nil {
-			G.Log.Errorf("Delete error: %s", err)
+	if cr.Freshness() == keybase1.CheckResultFreshness_RANCID {
+		if err := pc.G().LocalDb.Delete(dbkey); err != nil {
+			pc.G().Log.Errorf("Delete error: %s", err)
 		}
-		G.Log.Debug("| Cached CheckResult for %s wasn't fresh", sidstr)
+		pc.G().Log.Debug("| Cached CheckResult for %s wasn't fresh", sidstr)
 		return nil
 	}
 
@@ -186,14 +198,18 @@ func (pc *ProofCache) dbGet(sid keybase1.SigID) (cr *CheckResult) {
 func (pc *ProofCache) dbPut(sid keybase1.SigID, cr CheckResult) error {
 	dbkey, _ := pc.dbKey(sid)
 	jw := cr.Pack()
-	return G.LocalDb.Put(dbkey, []DbKey{}, jw)
+	return pc.G().LocalDb.Put(dbkey, []DbKey{}, jw)
 }
 
 func (pc *ProofCache) Put(sid keybase1.SigID, pe ProofError) error {
 	if pc == nil {
 		return nil
 	}
-	cr := CheckResult{pe, time.Now()}
+	cr := CheckResult{
+		Contextified: pc.Contextified,
+		Status:       pe,
+		Time:         pc.G().Clock().Now(),
+	}
 	pc.memPut(sid, cr)
 	return pc.dbPut(sid, cr)
 }

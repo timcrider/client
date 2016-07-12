@@ -1,3 +1,6 @@
+// Copyright 2015 Keybase, Inc. All rights reserved. Use of
+// this source code is governed by the included BSD license.
+
 package engine
 
 import (
@@ -6,7 +9,7 @@ import (
 	"strings"
 
 	"github.com/keybase/client/go/libkb"
-	keybase1 "github.com/keybase/client/protocol/go"
+	keybase1 "github.com/keybase/client/go/protocol"
 	jsonw "github.com/keybase/go-jsonw"
 )
 
@@ -25,9 +28,10 @@ func (tl TrackList) Less(i, j int) bool {
 }
 
 type ListTrackingEngineArg struct {
-	JSON    bool
-	Verbose bool
-	Filter  string
+	JSON         bool
+	Verbose      bool
+	Filter       string
+	ForAssertion string
 }
 
 type ListTrackingEngine struct {
@@ -55,8 +59,12 @@ func (e *ListTrackingEngine) RequiredUIs() []libkb.UIKind { return []libkb.UIKin
 func (e *ListTrackingEngine) SubConsumers() []libkb.UIConsumer { return nil }
 
 func (e *ListTrackingEngine) Run(ctx *Context) (err error) {
-	user, err := libkb.LoadMe(libkb.NewLoadUserArg(e.G()))
-
+	var user *libkb.User
+	if len(e.arg.ForAssertion) > 0 {
+		user, err = libkb.LoadUser(libkb.NewLoadUserByNameArg(e.G(), e.arg.ForAssertion))
+	} else {
+		user, err = libkb.LoadMe(libkb.NewLoadUserArg(e.G()))
+	}
 	if err != nil {
 		return
 	}

@@ -1,26 +1,32 @@
+// Copyright 2015 Keybase, Inc. All rights reserved. Use of
+// this source code is governed by the included BSD license.
+
 package client
 
 import (
 	"fmt"
 
+	"golang.org/x/net/context"
+
 	"github.com/keybase/cli"
 	"github.com/keybase/client/go/libcmdline"
 	"github.com/keybase/client/go/libkb"
-	keybase1 "github.com/keybase/client/protocol/go"
-	"github.com/maxtaco/go-framed-msgpack-rpc/rpc2"
+	keybase1 "github.com/keybase/client/go/protocol"
+	rpc "github.com/keybase/go-framed-msgpack-rpc"
 )
 
 type CmdUntrack struct {
 	user string
+	libkb.Contextified
 }
 
-func NewCmdUntrack(cl *libcmdline.CommandLine) cli.Command {
+func NewCmdUntrack(cl *libcmdline.CommandLine, g *libkb.GlobalContext) cli.Command {
 	return cli.Command{
 		Name:         "untrack",
 		ArgumentHelp: "<username>",
 		Usage:        "Untrack a user",
 		Action: func(c *cli.Context) {
-			cl.ChooseCommand(&CmdUntrack{}, "untrack", c)
+			cl.ChooseCommand(&CmdUntrack{Contextified: libkb.NewContextified(g)}, "untrack", c)
 		},
 	}
 }
@@ -34,20 +40,19 @@ func (v *CmdUntrack) ParseArgv(ctx *cli.Context) error {
 }
 
 func (v *CmdUntrack) Run() error {
-	cli, err := GetTrackClient()
+	cli, err := GetTrackClient(v.G())
 	if err != nil {
 		return err
 	}
 
-	protocols := []rpc2.Protocol{
-		NewLogUIProtocol(),
-		NewSecretUIProtocol(),
+	protocols := []rpc.Protocol{
+		NewSecretUIProtocol(G),
 	}
 	if err = RegisterProtocols(protocols); err != nil {
 		return err
 	}
 
-	return cli.Untrack(keybase1.UntrackArg{
+	return cli.Untrack(context.TODO(), keybase1.UntrackArg{
 		Username: v.user,
 	})
 }

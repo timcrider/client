@@ -1,10 +1,13 @@
+// Copyright 2015 Keybase, Inc. All rights reserved. Use of
+// this source code is governed by the included BSD license.
+
 package engine
 
 import (
 	"strings"
 
 	"github.com/keybase/client/go/libkb"
-	keybase1 "github.com/keybase/client/protocol/go"
+	keybase1 "github.com/keybase/client/go/protocol"
 )
 
 type UserSummary struct {
@@ -132,6 +135,7 @@ func (p *Proofs) Export() keybase1.Proofs {
 type Summary struct {
 	UID       keybase1.UID `json:"-"`
 	Username  string       `json:"username"`
+	Thumbnail string       `json:"thumbnail"`
 	IDVersion int          `json:"id_version"`
 	FullName  string       `json:"full_name"`
 	Bio       string       `json:"bio"`
@@ -142,6 +146,7 @@ func (s Summary) Export() keybase1.UserSummary {
 	return keybase1.UserSummary{
 		Uid:       s.UID,
 		Username:  s.Username,
+		Thumbnail: s.Thumbnail,
 		IdVersion: s.IDVersion,
 		FullName:  s.FullName,
 		Bio:       s.Bio,
@@ -149,10 +154,17 @@ func (s Summary) Export() keybase1.UserSummary {
 	}
 }
 
+type displayInfo struct {
+	Status libkb.AppStatus           `json:"status"`
+	Users  map[keybase1.UID]*Summary `json:"display"`
+}
+
+func (d *displayInfo) GetAppStatus() *libkb.AppStatus {
+	return &d.Status
+}
+
 func (e *UserSummary) get() (map[keybase1.UID]*Summary, error) {
-	var j struct {
-		Users map[keybase1.UID]*Summary `json:"display"`
-	}
+
 	args := libkb.APIArg{
 		Endpoint: "user/display_info",
 		Args: libkb.HTTPArgs{
@@ -160,6 +172,7 @@ func (e *UserSummary) get() (map[keybase1.UID]*Summary, error) {
 		},
 	}
 	// using POST because uids list might be long...
+	var j displayInfo
 	if err := e.G().API.PostDecode(args, &j); err != nil {
 		return nil, err
 	}

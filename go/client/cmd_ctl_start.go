@@ -1,3 +1,8 @@
+// Copyright 2015 Keybase, Inc. All rights reserved. Use of
+// this source code is governed by the included BSD license.
+
+// +build !darwin
+
 package client
 
 import (
@@ -6,19 +11,21 @@ import (
 	"github.com/keybase/client/go/libkb"
 )
 
-func NewCmdCtlStart(cl *libcmdline.CommandLine) cli.Command {
+func NewCmdCtlStart(cl *libcmdline.CommandLine, g *libkb.GlobalContext) cli.Command {
 	return cli.Command{
 		Name:  "start",
 		Usage: "Start the background keybase service",
 		Action: func(c *cli.Context) {
-			cl.ChooseCommand(&CmdCtlStart{}, "start", c)
+			cl.ChooseCommand(&CmdCtlStart{libkb.NewContextified(g)}, "start", c)
 			cl.SetForkCmd(libcmdline.ForceFork)
 			cl.SetNoStandalone()
 		},
 	}
 }
 
-type CmdCtlStart struct{}
+type CmdCtlStart struct {
+	libkb.Contextified
+}
 
 func (s *CmdCtlStart) ParseArgv(ctx *cli.Context) error {
 	return nil

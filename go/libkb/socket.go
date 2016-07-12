@@ -1,77 +1,34 @@
-// +build darwin dragonfly freebsd linux nacl netbsd openbsd solaris
+// Copyright 2015 Keybase, Inc. All rights reserved. Use of
+// this source code is governed by the included BSD license.
 
 package libkb
 
 import (
 	"fmt"
 	"net"
-	"runtime"
 
-	"github.com/maxtaco/go-framed-msgpack-rpc/rpc2"
+	rpc "github.com/keybase/go-framed-msgpack-rpc"
 )
 
-type SocketInfo interface {
-	PrepSocket() error
-	ToStringPair() (string, string)
+// NewSocket() (Socket, err) is defined in the various platform-specific socket_*.go files.
+type Socket interface {
+	BindToSocket() (net.Listener, error)
+	DialSocket() (net.Conn, error)
+	GetFile() string
 }
 
-type SocketInfoUnix struct {
+type SocketInfo struct {
+	Contextified
 	file string
 }
 
-type SocketInfoTCP struct {
-	port int
-}
-
-func (s SocketInfoUnix) PrepSocket() error {
-	return MakeParentDirs(s.file)
-}
-
-func (s SocketInfoUnix) ToStringPair() (string, string) {
-	return "unix", s.file
-}
-
-func (s SocketInfoTCP) PrepSocket() error {
-	return nil
-}
-
-func (s SocketInfoTCP) ToStringPair() (string, string) {
-	return "tcp", fmt.Sprintf("127.0.0.1:%d", s.port)
-}
-
-func BindToSocket(info SocketInfo) (ret net.Listener, err error) {
-	if err = info.PrepSocket(); err != nil {
-		return
-	}
-	l, a := info.ToStringPair()
-	G.Log.Info("Binding to %s:%s", l, a)
-	return net.Listen(l, a)
-}
-
-func DialSocket(info SocketInfo) (ret net.Conn, err error) {
-	return net.Dial(info.ToStringPair())
-}
-
-func ConfigureSocketInfo() (ret SocketInfo, err error) {
-	port := G.Env.GetDaemonPort()
-	if runtime.GOOS == "windows" && port == 0 {
-		port = DaemonPort
-	}
-	if port != 0 {
-		ret = SocketInfoTCP{port}
-	} else {
-		var s string
-		s, err = G.Env.GetSocketFile()
-		if err == nil {
-			ret = SocketInfoUnix{s}
-		}
-	}
-	return
+func (s SocketInfo) GetFile() string {
+	return s.file
 }
 
 type SocketWrapper struct {
 	conn net.Conn
-	xp   *rpc2.Transport
+	xp   rpc.Transporter
 	err  error
 }
 
@@ -84,16 +41,22 @@ func (g *GlobalContext) MakeLoopbackServer() (l net.Listener, err error) {
 }
 
 func (g *GlobalContext) BindToSocket() (net.Listener, error) {
-	return BindToSocket(g.SocketInfo)
+	return g.SocketInfo.BindToSocket()
 }
 
-func (g *GlobalContext) ClearSocketError() {
-	g.socketWrapperMu.Lock()
+func NewTransportFromSocket(g *GlobalContext, s net.Conn) rpc.Transporter {
+	return rpc.NewTransport(s, NewRPCLogFactory(g), WrapError)
+}
+
+// ResetSocket clears and returns a new socket
+func (g *GlobalContext) ResetSocket(clearError bool) (net.Conn, rpc.Transporter, bool, error) {
 	g.SocketWrapper = nil
-	g.socketWrapperMu.Unlock()
+	return g.GetSocket(clearError)
 }
 
-func (g *GlobalContext) GetSocket() (net.Conn, *rpc2.Transport, error) {
+func (g *GlobalContext) GetSocket(clearError bool) (conn net.Conn, xp rpc.Transporter, isNew bool, err error) {
+
+	g.Trace("GetSocket", func() error { return err })()
 
 	// Protect all global socket wrapper manipulation with a
 	// lock to prevent race conditions.
@@ -103,9 +66,10 @@ func (g *GlobalContext) GetSocket() (net.Conn, *rpc2.Transport, error) {
 	needWrapper := false
 	if g.SocketWrapper == nil {
 		needWrapper = true
+		g.Log.Debug("| empty socket wrapper; need a new one")
 	} else if g.SocketWrapper.xp != nil && !g.SocketWrapper.xp.IsConnected() {
 		// need reconnect
-		G.Log.Info("rpc transport disconnected, reconnecting...")
+		g.Log.Debug("| rpc transport isn't connected, reconnecting...")
 		needWrapper = true
 	}
 
@@ -116,13 +80,21 @@ func (g *GlobalContext) GetSocket() (net.Conn, *rpc2.Transport, error) {
 		} else if g.SocketInfo == nil {
 			sw.err = fmt.Errorf("Cannot get socket in standalone mode")
 		} else {
-			sw.conn, sw.err = DialSocket(g.SocketInfo)
+			sw.conn, sw.err = g.SocketInfo.DialSocket()
+			g.Log.Debug("| DialSocket -> %s", ErrToOk(sw.err))
+			isNew = true
 		}
 		if sw.err == nil {
-			sw.xp = rpc2.NewTransport(sw.conn, NewRPCLogFactory(), WrapError)
+			sw.xp = NewTransportFromSocket(g, sw.conn)
 		}
 		g.SocketWrapper = &sw
 	}
 
-	return g.SocketWrapper.conn, g.SocketWrapper.xp, g.SocketWrapper.err
+	sw := g.SocketWrapper
+	if sw.err != nil && clearError {
+		g.SocketWrapper = nil
+	}
+	err = sw.err
+
+	return sw.conn, sw.xp, isNew, err
 }

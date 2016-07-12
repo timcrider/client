@@ -1,3 +1,6 @@
+// Copyright 2015 Keybase, Inc. All rights reserved. Use of
+// this source code is governed by the included BSD license.
+
 package engine
 
 import (
@@ -6,10 +9,10 @@ import (
 	"testing"
 
 	"github.com/keybase/client/go/libkb"
-	keybase1 "github.com/keybase/client/protocol/go"
+	keybase1 "github.com/keybase/client/go/protocol"
 )
 
-func TestPGPVerify(t *testing.T) {
+func doVerify(t *testing.T, msg string) {
 	tc := SetupEngineTest(t, "PGPVerify")
 	defer tc.Cleanup()
 	fu := createFakeUserWithPGPSibkey(tc)
@@ -18,9 +21,8 @@ func TestPGPVerify(t *testing.T) {
 		IdentifyUI: &FakeIdentifyUI{},
 		SecretUI:   fu.NewSecretUI(),
 		LogUI:      tc.G.UI.GetLogUI(),
+		PgpUI:      &TestPgpUI{},
 	}
-
-	msg := "If you wish to stop receiving notifications from this topic, please click or visit the link below to unsubscribe:"
 
 	// create detached sig
 	detached := sign(ctx, tc, msg, keybase1.SignMode_DETACHED)
@@ -70,6 +72,16 @@ func TestPGPVerify(t *testing.T) {
 	// verify that attached signature
 }
 
+func TestPGPVerify(t *testing.T) {
+	msg := "If you wish to stop receiving notifications from this topic, please click or visit the link below to unsubscribe:"
+	doVerify(t, msg)
+}
+
+func TestPGPVerifyShortMsg(t *testing.T) {
+	msg := "less than 100 characters"
+	doVerify(t, msg)
+}
+
 func sign(ctx *Context, tc libkb.TestContext, msg string, mode keybase1.SignMode) string {
 	sink := libkb.NewBufferCloser()
 	arg := &PGPSignArg{
@@ -87,9 +99,8 @@ func sign(ctx *Context, tc libkb.TestContext, msg string, mode keybase1.SignMode
 func signEnc(ctx *Context, tc libkb.TestContext, msg string) string {
 	sink := libkb.NewBufferCloser()
 	arg := &PGPEncryptArg{
-		Sink:         sink,
-		Source:       strings.NewReader(msg),
-		TrackOptions: keybase1.TrackOptions{BypassConfirm: true},
+		Sink:   sink,
+		Source: strings.NewReader(msg),
 	}
 	eng := NewPGPEncrypt(arg, tc.G)
 	if err := RunEngine(eng, ctx); err != nil {
@@ -100,9 +111,8 @@ func signEnc(ctx *Context, tc libkb.TestContext, msg string) string {
 
 func verify(ctx *Context, tc libkb.TestContext, msg, sig, name string, valid bool) {
 	arg := &PGPVerifyArg{
-		Source:       strings.NewReader(msg),
-		Signature:    []byte(sig),
-		TrackOptions: keybase1.TrackOptions{BypassConfirm: true},
+		Source:    strings.NewReader(msg),
+		Signature: []byte(sig),
 	}
 	eng := NewPGPVerify(arg, tc.G)
 	if err := RunEngine(eng, ctx); err != nil {
@@ -119,12 +129,15 @@ func verify(ctx *Context, tc libkb.TestContext, msg, sig, name string, valid boo
 	if !ok {
 		tc.T.Fatalf("%s: invalid secret ui: %T", name, ctx.SecretUI)
 	}
-	if s.CalledGetSecret {
-		tc.T.Errorf("%s: called get secret, shouldn't have", name)
-		s.CalledGetSecret = false // reset it for next caller
+	if s.CalledGetPassphrase {
+		tc.T.Errorf("%s: called get passphrase, shouldn't have", name)
+		s.CalledGetPassphrase = false // reset it for next caller
 	}
-	if s.CalledGetKBPassphrase {
-		tc.T.Errorf("%s: called get kb passphrase, shouldn't have", name)
-		s.CalledGetKBPassphrase = false // reset it for next caller
+	p, ok := ctx.PgpUI.(*TestPgpUI)
+	if !ok {
+		tc.T.Fatalf("%s: invalid pgp ui: %T", name, ctx.PgpUI)
+	}
+	if p.OutputCount == 0 {
+		tc.T.Errorf("%s: did not output signature success", name)
 	}
 }

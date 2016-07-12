@@ -1,13 +1,16 @@
+// Copyright 2015 Keybase, Inc. All rights reserved. Use of
+// this source code is governed by the included BSD license.
+
 package libkb
 
 import (
 	"io/ioutil"
-	"log"
 	"os"
 	"path/filepath"
 	"regexp"
 	"strings"
 	"unicode"
+	"unicode/utf8"
 )
 
 type ConfigGetter func() string
@@ -77,18 +80,10 @@ func (x XdgPosix) ConfigDir() string { return x.dirHelper("XDG_CONFIG_HOME", ".c
 func (x XdgPosix) CacheDir() string  { return x.dirHelper("XDG_CACHE_HOME", ".cache") }
 func (x XdgPosix) DataDir() string   { return x.dirHelper("XDG_DATA_HOME", ".local", "share") }
 
-func (x XdgPosix) xdgRuntimeDir() string { return os.Getenv("XDG_RUNTIME_DIR") }
-
-func (x XdgPosix) RuntimeDir() string {
-	ret := x.xdgRuntimeDir()
-	if len(ret) != 0 {
-		return ret
-	}
-	return x.ConfigDir()
-}
+func (x XdgPosix) RuntimeDir() string { return x.dirHelper("XDG_RUNTIME_DIR", ".config") }
 
 func (x XdgPosix) ServiceSpawnDir() (ret string, err error) {
-	ret = x.xdgRuntimeDir()
+	ret = x.RuntimeDir()
 	if len(ret) == 0 {
 		ret, err = ioutil.TempDir("", "keybase_service")
 	}
@@ -130,7 +125,15 @@ func (d Darwin) ConfigDir() string                { return d.homeDir(d.Home(fals
 func (d Darwin) DataDir() string                  { return d.ConfigDir() }
 func (d Darwin) RuntimeDir() string               { return d.CacheDir() }
 func (d Darwin) ServiceSpawnDir() (string, error) { return d.RuntimeDir(), nil }
-func (d Darwin) LogDir() string                   { return d.homeDir(d.Home(false), "Library", "Logs") }
+func (d Darwin) LogDir() string {
+	appName := toUpper(d.appName)
+	runMode := d.getRunMode()
+	dirs := []string{d.Home(false), "Library", "Logs"}
+	if runMode != ProductionRunMode {
+		dirs = append(dirs, appName+toUpper(string(runMode)))
+	}
+	return filepath.Join(dirs...)
+}
 
 func (d Darwin) Home(emptyOk bool) string {
 	var ret string
@@ -172,24 +175,50 @@ func (w Win32) Home(emptyOk bool) string {
 		ret = w.getHome()
 	}
 	if len(ret) == 0 && !emptyOk {
+		ret, _ = AppDataDir()
+		if len(ret) == 0 {
+			G.Log.Info("APPDATA environment variable not found")
+		}
+
+	}
+	if len(ret) == 0 && !emptyOk {
 		tmp := os.Getenv("TEMP")
 		if len(tmp) == 0 {
-			log.Fatalf("No 'TEMP' environment variable found")
+			G.Log.Info("No 'TEMP' environment variable found")
+			tmp = os.Getenv("TMP")
+			if len(tmp) == 0 {
+				G.Log.Fatalf("No 'TMP' environment variable found")
+			}
 		}
 		v := w.Split(tmp)
 		if len(v) < 2 {
-			log.Fatalf("Bad 'TEMP' variable found, no directory separators!")
+			G.Log.Fatalf("Bad 'TEMP' variable found, no directory separators!")
 		}
 		last := strings.ToLower(v[len(v)-1])
 		rest := v[0 : len(v)-1]
 		if last != "temp" && last != "tmp" {
-			log.Fatalf("TEMP directory didn't end in \\Temp")
+			G.Log.Fatalf("TEMP directory didn't end in \\Temp")
 		}
 		if strings.ToLower(rest[len(rest)-1]) == "local" {
 			rest[len(rest)-1] = "Roaming"
 		}
 		ret = w.Unsplit(rest)
 	}
+
+	packageName := "Keybase"
+
+	if w.getRunMode() == DevelRunMode || w.getRunMode() == StagingRunMode {
+		runModeName := string(w.getRunMode())
+		if runModeName != "" {
+			// Capitalize the first letter
+			r, n := utf8.DecodeRuneInString(runModeName)
+			runModeName = string(unicode.ToUpper(r)) + runModeName[n:]
+			packageName = packageName + runModeName
+		}
+	}
+
+	ret = filepath.Join(ret, packageName)
+
 	return ret
 }
 

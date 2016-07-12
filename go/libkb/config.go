@@ -1,12 +1,16 @@
+// Copyright 2015 Keybase, Inc. All rights reserved. Use of
+// this source code is governed by the included BSD license.
+
 package libkb
 
 import (
 	"fmt"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
 
-	keybase1 "github.com/keybase/client/protocol/go"
+	keybase1 "github.com/keybase/client/go/protocol"
 	jsonw "github.com/keybase/go-jsonw"
 )
 
@@ -20,8 +24,8 @@ type JSONConfigFile struct {
 	userConfigWrapper *UserConfigWrapper
 }
 
-func NewJSONConfigFile(s string) *JSONConfigFile {
-	return &JSONConfigFile{NewJSONFile(s, "config"), &UserConfigWrapper{}}
+func NewJSONConfigFile(g *GlobalContext, s string) *JSONConfigFile {
+	return &JSONConfigFile{NewJSONFile(g, s, "config"), &UserConfigWrapper{}}
 }
 
 type valueGetter func(*jsonw.Wrapper) (interface{}, error)
@@ -62,6 +66,10 @@ func (f JSONConfigFile) GetFilename() string {
 	return f.filename
 }
 
+func (f JSONConfigFile) GetInterfaceAtPath(p string) (i interface{}, err error) {
+	return f.jw.AtPath(p).GetInterface()
+}
+
 func (f JSONConfigFile) GetStringAtPath(p string) (ret string, isSet bool) {
 	i, isSet := f.getValueAtPath(p, getString)
 	if isSet {
@@ -99,7 +107,7 @@ func (f JSONConfigFile) GetDurationAtPath(p string) (time.Duration, bool) {
 	}
 	d, err := time.ParseDuration(s)
 	if err != nil {
-		G.Log.Warning("invalid time duration in config file: %s => %s", p, s)
+		f.G().Log.Warning("invalid time duration in config file: %s => %s", p, s)
 		return 0, false
 	}
 	return d, true
@@ -108,7 +116,7 @@ func (f JSONConfigFile) GetDurationAtPath(p string) (time.Duration, bool) {
 func (f JSONConfigFile) GetTopLevelString(s string) (ret string) {
 	var e error
 	f.jw.AtKey(s).GetStringVoid(&ret, &e)
-	G.Log.Debug("Config: mapping %s -> %s", s, ret)
+	f.G().VDL.Log(VLog1, "Config: mapping %q -> %q", s, ret)
 	return
 }
 
@@ -127,8 +135,16 @@ func (f *JSONConfigFile) setValueAtPath(p string, getter valueGetter, v interfac
 	if err != nil || existing != v {
 		err = f.jw.SetValueAtPath(p, jsonw.NewWrapper(v))
 		if err == nil {
-			return f.flush()
+			return f.Save()
 		}
+	}
+	return err
+}
+
+func (f *JSONConfigFile) SetWrapperAtPath(p string, w *jsonw.Wrapper) error {
+	err := f.jw.SetValueAtPath(p, w)
+	if err == nil {
+		err = f.Save()
 	}
 	return err
 }
@@ -145,12 +161,16 @@ func (f *JSONConfigFile) SetIntAtPath(p string, v int) error {
 	return f.setValueAtPath(p, getInt, v)
 }
 
+func (f *JSONConfigFile) SetInt64AtPath(p string, v int64) error {
+	return f.setValueAtPath(p, getInt, v)
+}
+
 func (f *JSONConfigFile) SetNullAtPath(p string) (err error) {
 	existing := f.jw.AtPath(p)
 	if !existing.IsNil() || existing.Error() != nil {
 		err = f.jw.SetValueAtPath(p, jsonw.NewNil())
 		if err == nil {
-			return f.flush()
+			return f.Save()
 		}
 	}
 	return
@@ -190,17 +210,38 @@ func (f *JSONConfigFile) SwitchUser(nu NormalizedUsername) error {
 	defer f.userConfigWrapper.Unlock()
 
 	if cu := f.getCurrentUser(); cu.Eq(nu) {
-		G.Log.Debug("| Already configured as user=%s", nu)
+		f.G().Log.Debug("| Already configured as user=%s", nu)
 		return nil
 	}
 
 	if f.jw.AtKey("users").AtKey(nu.String()).IsNil() {
-		return UserNotFoundError{msg: nu.String()}
+		return UserNotFoundError{Msg: nu.String()}
 	}
 
 	f.jw.SetKey("current_user", jsonw.NewString(nu.String()))
 	f.userConfigWrapper.userConfig = nil
-	return f.flush()
+	return f.Save()
+}
+
+func (f *JSONConfigFile) NukeUser(nu NormalizedUsername) error {
+	f.userConfigWrapper.Lock()
+	defer f.userConfigWrapper.Unlock()
+
+	if cu := f.getCurrentUser(); cu.Eq(nu) {
+		err := f.jw.DeleteValueAtPath("current_user")
+		if err != nil {
+			return err
+		}
+	}
+
+	if !f.jw.AtKey("users").AtKey(nu.String()).IsNil() {
+		err := f.jw.DeleteValueAtPath("users." + nu.String())
+		if err != nil {
+			return err
+		}
+	}
+
+	return f.Save()
 }
 
 // GetUserConfigForUsername sees if there's a UserConfig object for the given
@@ -243,7 +284,7 @@ func (f *JSONConfigFile) SetDeviceID(did keybase1.DeviceID) (err error) {
 	f.userConfigWrapper.Lock()
 	defer f.userConfigWrapper.Unlock()
 
-	G.Log.Debug("| Setting DeviceID to %v\n", did)
+	f.G().Log.Debug("| Setting DeviceID to %v\n", did)
 	var u *UserConfig
 	if u, err = f.getUserConfigWithLock(); err != nil {
 	} else if u == nil {
@@ -274,19 +315,18 @@ func (f *JSONConfigFile) SetUserConfig(u *UserConfig, overwrite bool) error {
 func (f *JSONConfigFile) setUserConfigWithLock(u *UserConfig, overwrite bool) error {
 
 	if u == nil {
-		G.Log.Debug("| SetUserConfig(nil)")
+		f.G().Log.Debug("| SetUserConfig(nil)")
 		f.jw.DeleteKey("current_user")
 		f.userConfigWrapper.userConfig = nil
-		return f.flush()
+		return f.Save()
 	}
 
 	parent := f.jw.AtKey("users")
 	un := u.GetUsername()
-	G.Log.Debug("| SetUserConfig(%s)", un)
+	f.G().Log.Debug("| SetUserConfig(%s)", un)
 	if parent.IsNil() {
 		parent = jsonw.NewDictionary()
 		f.jw.SetKey("users", parent)
-		f.dirty = true
 	}
 	if parent.AtKey(un.String()).IsNil() || overwrite {
 		uWrapper, err := jsonw.NewObjectWrapper(*u)
@@ -295,35 +335,24 @@ func (f *JSONConfigFile) setUserConfigWithLock(u *UserConfig, overwrite bool) er
 		}
 		parent.SetKey(un.String(), uWrapper)
 		f.userConfigWrapper.userConfig = u
-		f.dirty = true
 	}
 
 	if !f.getCurrentUser().Eq(un) {
 		f.jw.SetKey("current_user", jsonw.NewString(un.String()))
 		f.userConfigWrapper.userConfig = nil
-		f.dirty = true
 	}
 
-	return f.Write()
+	return f.Save()
 }
 
 func (f *JSONConfigFile) DeleteAtPath(p string) {
 	f.jw.DeleteValueAtPath(p)
-	f.flush()
+	f.Save()
 }
 
 func (f *JSONConfigFile) Reset() {
 	f.jw = jsonw.NewDictionary()
-	f.flush()
-}
-
-func (f *JSONConfigFile) flush() error {
-	f.dirty = true
-	return f.Write()
-}
-
-func (f *JSONConfigFile) Write() error {
-	return f.MaybeSave(true, 0)
+	f.Save()
 }
 
 func (f JSONConfigFile) GetHome() string {
@@ -334,6 +363,9 @@ func (f JSONConfigFile) GetServerURI() string {
 }
 func (f JSONConfigFile) GetConfigFilename() string {
 	return f.GetTopLevelString("config_file")
+}
+func (f JSONConfigFile) GetUpdaterConfigFilename() string {
+	return f.GetTopLevelString("updater_config_file")
 }
 func (f JSONConfigFile) GetSecretKeyringTemplate() string {
 	return f.GetTopLevelString("secret_keyring")
@@ -412,11 +444,30 @@ func (f JSONConfigFile) GetDeviceID() (ret keybase1.DeviceID) {
 	return ret
 }
 
+func (f JSONConfigFile) GetTorMode() (ret TorMode, err error) {
+	if s, isSet := f.GetStringAtPath("tor.mode"); isSet {
+		ret, err = StringToTorMode(s)
+	}
+	return ret, err
+}
+
+func (f JSONConfigFile) GetTorHiddenAddress() string {
+	s, _ := f.GetStringAtPath("tor.hidden_address")
+	return s
+}
+func (f JSONConfigFile) GetTorProxy() string {
+	s, _ := f.GetStringAtPath("tor.proxy")
+	return s
+}
+
 func (f JSONConfigFile) GetProxy() string {
 	return f.GetTopLevelString("proxy")
 }
 func (f JSONConfigFile) GetDebug() (bool, bool) {
 	return f.GetTopLevelBool("debug")
+}
+func (f JSONConfigFile) GetVDebugSetting() string {
+	return f.GetTopLevelString("vdebug")
 }
 func (f JSONConfigFile) GetAutoFork() (bool, bool) {
 	return f.GetTopLevelBool("auto_fork")
@@ -424,19 +475,38 @@ func (f JSONConfigFile) GetAutoFork() (bool, bool) {
 func (f JSONConfigFile) GetLogFormat() string {
 	return f.GetTopLevelString("log_format")
 }
-func (f JSONConfigFile) GetLabel() string {
-	return f.GetTopLevelString("label")
-}
 func (f JSONConfigFile) GetStandalone() (bool, bool) {
 	return f.GetTopLevelBool("standalone")
+}
+
+func (f JSONConfigFile) GetGregorURI() string {
+	s, _ := f.GetStringAtPath("push.server_uri")
+	return s
+}
+func (f JSONConfigFile) GetGregorDisabled() (bool, bool) {
+	return f.GetBoolAtPath("push.disabled")
+}
+
+func (f JSONConfigFile) GetGregorSaveInterval() (time.Duration, bool) {
+	return f.GetDurationAtPath("push.save_interval")
+}
+
+func (f JSONConfigFile) GetGregorPingInterval() (time.Duration, bool) {
+	return f.GetDurationAtPath("push.ping_interval")
 }
 
 func (f JSONConfigFile) getCacheSize(w string) (int, bool) {
 	return f.jw.AtPathGetInt(w)
 }
 
-func (f JSONConfigFile) GetUserCacheSize() (int, bool) {
-	return f.getCacheSize("cache.limits.users")
+func (f JSONConfigFile) GetUserCacheMaxAge() (time.Duration, bool) {
+	return f.GetDurationAtPath("cache.maxage.users")
+}
+func (f JSONConfigFile) GetAPITimeout() (time.Duration, bool) {
+	return f.GetDurationAtPath("timeouts.api")
+}
+func (f JSONConfigFile) GetScraperTimeout() (time.Duration, bool) {
+	return f.GetDurationAtPath("timeouts.scraper")
 }
 func (f JSONConfigFile) GetProofCacheSize() (int, bool) {
 	return f.getCacheSize("cache.limits.proofs")
@@ -454,6 +524,35 @@ func (f JSONConfigFile) GetProofCacheShortDur() (time.Duration, bool) {
 	return f.GetDurationAtPath("cache.short_duration.proofs")
 }
 
+func (f JSONConfigFile) GetLinkCacheSize() (int, bool) {
+	return f.getCacheSize("cache.limits.links")
+}
+
+func (f JSONConfigFile) GetLinkCacheCleanDur() (time.Duration, bool) {
+	return f.GetDurationAtPath("cache.clean_duration.links")
+}
+
+func (f JSONConfigFile) getStringArray(v *jsonw.Wrapper) []string {
+	n, err := v.Len()
+	if err != nil {
+		return nil
+	}
+
+	if n == 0 {
+		return nil
+	}
+
+	ret := make([]string, n)
+	for i := 0; i < n; i++ {
+		s, err := v.AtIndex(i).GetString()
+		if err != nil {
+			return nil
+		}
+		ret[i] = s
+	}
+	return ret
+}
+
 func (f JSONConfigFile) GetMerkleKIDs() []string {
 	if f.jw == nil {
 		return nil
@@ -464,24 +563,19 @@ func (f JSONConfigFile) GetMerkleKIDs() []string {
 		return nil
 	}
 
-	l, err := v.Len()
-	if err != nil {
+	return f.getStringArray(v)
+}
+
+func (f JSONConfigFile) GetCodeSigningKIDs() []string {
+	if f.jw == nil {
 		return nil
 	}
 
-	if l == 0 {
+	v, err := f.jw.AtKey("keys").AtKey("codesigning").ToArray()
+	if err != nil || v == nil {
 		return nil
 	}
-
-	ret := make([]string, l)
-	for i := 0; i < l; i++ {
-		s, err := v.AtIndex(i).GetString()
-		if err != nil {
-			return nil
-		}
-		ret[i] = s
-	}
-	return ret
+	return f.getStringArray(v)
 }
 
 func (f JSONConfigFile) GetGpgHome() (ret string) {
@@ -491,9 +585,9 @@ func (f JSONConfigFile) GetGpgHome() (ret string) {
 
 func (f JSONConfigFile) GetBundledCA(host string) (ret string) {
 	var err error
-	f.jw.AtKey("bundled_CAs").AtKey(host).GetStringVoid(&ret, &err)
+	f.jw.AtKey("bundled_ca").AtKey(host).GetStringVoid(&ret, &err)
 	if err == nil {
-		G.Log.Debug("Read bundled CA for %s", host)
+		f.G().Log.Debug("Read bundled CA for %s", host)
 	}
 	return ret
 }
@@ -504,12 +598,9 @@ func (f JSONConfigFile) GetSocketFile() string {
 func (f JSONConfigFile) GetPidFile() string {
 	return f.GetTopLevelString("pid_file")
 }
-func (f JSONConfigFile) GetDaemonPort() (int, bool) {
-	return f.GetIntAtPath("daemon_port")
-}
 
 func (f JSONConfigFile) GetProxyCACerts() (ret []string, err error) {
-	jw := f.jw.AtKey("proxyCAs")
+	jw := f.jw.AtKey("proxy_ca_certs")
 	if l, e := jw.Len(); e == nil {
 		for i := 0; i < l; i++ {
 			s, e2 := jw.AtIndex(i).GetString()
@@ -532,6 +623,87 @@ func (f JSONConfigFile) GetProxyCACerts() (ret []string, err error) {
 func (f JSONConfigFile) GetLogFile() string {
 	return f.GetTopLevelString("log_file")
 }
-func (f JSONConfigFile) GetSplitLogOutput() (bool, bool) {
-	return f.GetTopLevelBool("split_log_output")
+
+func (f JSONConfigFile) GetSecurityAccessGroupOverride() (bool, bool) {
+	return false, false
+}
+
+func (f JSONConfigFile) GetUpdatePreferenceAuto() (bool, bool) {
+	return f.GetBoolAtPath("updates.auto")
+}
+
+func (f JSONConfigFile) GetUpdatePreferenceSnoozeUntil() keybase1.Time {
+	return f.GetTimeAtPath("updates.snooze")
+}
+
+func (f JSONConfigFile) GetUpdateLastChecked() keybase1.Time {
+	return f.GetTimeAtPath("updates.last_checked")
+}
+
+func (f JSONConfigFile) GetUpdatePreferenceSkip() string {
+	s, _ := f.GetStringAtPath("updates.skip")
+	return s
+}
+
+func (f *JSONConfigFile) SetUpdatePreferenceAuto(b bool) error {
+	return f.SetBoolAtPath("updates.auto", b)
+}
+
+func (f *JSONConfigFile) SetUpdatePreferenceSkip(v string) error {
+	return f.SetStringAtPath("updates.skip", v)
+}
+
+func (f *JSONConfigFile) SetUpdatePreferenceSnoozeUntil(t keybase1.Time) error {
+	return f.SetTimeAtPath("updates.snooze", t)
+}
+
+func (f *JSONConfigFile) SetUpdateLastChecked(t keybase1.Time) error {
+	return f.SetTimeAtPath("updates.last_checked", t)
+}
+
+func (f JSONConfigFile) GetUpdateURL() string {
+	s, _ := f.GetStringAtPath("updates.url")
+	return s
+}
+
+func (f JSONConfigFile) GetUpdateDisabled() (bool, bool) {
+	return f.GetBoolAtPath("updates.disabled")
+}
+
+func (f JSONConfigFile) IsAdmin() (bool, bool) {
+	return f.GetBoolAtPath("is_admin")
+}
+
+func (f JSONConfigFile) GetAppStartMode() string {
+	s, _ := f.GetStringAtPath("app_start_mode")
+	return s
+}
+
+func (f JSONConfigFile) GetTimeAtPath(path string) keybase1.Time {
+	var ret keybase1.Time
+	s, _ := f.GetStringAtPath(path)
+	if len(s) == 0 {
+		return ret
+	}
+	u, err := strconv.ParseUint(s, 10, 64)
+	if err != nil {
+		return ret
+	}
+	ret = keybase1.Time(u)
+	return ret
+}
+
+func (f *JSONConfigFile) SetTimeAtPath(path string, t keybase1.Time) error {
+	if t == keybase1.Time(0) {
+		return f.SetNullAtPath(path)
+	}
+	return f.SetStringAtPath(path, fmt.Sprintf("%d", t))
+}
+
+func (f JSONConfigFile) GetLocalTrackMaxAge() (time.Duration, bool) {
+	return f.GetDurationAtPath("local_track_max_age")
+}
+
+func (f JSONConfigFile) GetMountDir() string {
+	return f.GetTopLevelString("mountdir")
 }

@@ -1,3 +1,6 @@
+// Copyright 2015 Keybase, Inc. All rights reserved. Use of
+// this source code is governed by the included BSD license.
+
 package libkb
 
 import (
@@ -73,7 +76,6 @@ func (ll *LoopbackListener) Dial() (net.Conn, error) {
 	}
 	a, b := NewLoopbackConnPair()
 	ll.ch <- a
-	G.Log.Debug("- LoopbackListener.Dial")
 	return b, nil
 }
 

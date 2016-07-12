@@ -1,10 +1,13 @@
+// Copyright 2015 Keybase, Inc. All rights reserved. Use of
+// this source code is governed by the included BSD license.
+
 package engine
 
 import (
 	"sort"
 
 	"github.com/keybase/client/go/libkb"
-	keybase1 "github.com/keybase/client/protocol/go"
+	keybase1 "github.com/keybase/client/go/protocol"
 )
 
 // DevList is an engine that gets a list of all the user's
@@ -46,7 +49,7 @@ func (d *DevList) Run(ctx *Context) error {
 		if err = libkb.RunSyncer(a.SecretSyncer(), uid, a.LoggedIn(), a.LocalSession()); err != nil {
 			return
 		}
-		devs, err = a.SecretSyncer().ActiveDevices(libkb.DefaultDeviceTypes)
+		devs, err = a.SecretSyncer().ActiveDevices(libkb.AllDeviceTypes)
 	}, "DevList - ActiveDevices")
 	if aerr != nil {
 		return aerr
@@ -58,11 +61,12 @@ func (d *DevList) Run(ctx *Context) error {
 	var pdevs []keybase1.Device
 	for k, v := range devs {
 		pdevs = append(pdevs, keybase1.Device{
-			Type:     v.Type,
-			Name:     v.Display(),
-			DeviceID: k,
-			CTime:    keybase1.TimeFromSeconds(v.CTime),
-			MTime:    keybase1.TimeFromSeconds(v.MTime),
+			Type:         v.Type,
+			Name:         v.Display(),
+			DeviceID:     k,
+			CTime:        keybase1.TimeFromSeconds(v.CTime),
+			MTime:        keybase1.TimeFromSeconds(v.MTime),
+			LastUsedTime: keybase1.TimeFromSeconds(v.LastUsedTime),
 		})
 	}
 	sort.Sort(dname(pdevs))

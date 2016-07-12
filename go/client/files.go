@@ -1,3 +1,6 @@
+// Copyright 2015 Keybase, Inc. All rights reserved. Use of
+// this source code is governed by the included BSD license.
+
 package client
 
 import (
@@ -8,12 +11,13 @@ import (
 	"os"
 
 	"github.com/keybase/client/go/libkb"
-	keybase1 "github.com/keybase/client/protocol/go"
+	keybase1 "github.com/keybase/client/go/protocol"
 )
 
 type Source interface {
 	io.ReadCloser
 	Open() error
+	CloseWithError(error) error
 }
 
 type Sink interface {
@@ -40,7 +44,8 @@ func (b *BufferSource) Read(p []byte) (n int, err error) {
 	return b.buf.Read(p)
 }
 
-func (b *BufferSource) Close() error { return nil }
+func (b *BufferSource) Close() error               { return nil }
+func (b *BufferSource) CloseWithError(error) error { return nil }
 
 type StdinSource struct {
 	open bool
@@ -51,14 +56,47 @@ func (b *StdinSource) Open() error {
 	return nil
 }
 
+func drain(f *os.File) error {
+	buf := make([]byte, 1024*64)
+	var err error
+	var n int
+	eof := false
+	for !eof && err == nil {
+		if n, err = f.Read(buf); n == 0 && err != nil {
+			eof = true
+			if err == io.EOF {
+				err = nil
+			}
+		}
+	}
+	return err
+}
+
+// Close a source, but consume all leftover input before so doing.
 func (b *StdinSource) Close() error {
+	var err error
+	if b.open {
+		err = drain(os.Stdin)
+	}
 	b.open = false
-	return nil
+	return err
+}
+
+func (b *StdinSource) CloseWithError(e error) error {
+	if e != nil {
+		b.open = false
+		return nil
+	}
+	return b.Close()
 }
 
 func (b *StdinSource) Read(p []byte) (n int, err error) {
 	if b.open {
-		return os.Stdin.Read(p)
+		n, err := os.Stdin.Read(p)
+		if n == 0 {
+			b.open = false
+		}
+		return n, err
 	}
 	return 0, io.EOF
 }
@@ -90,11 +128,19 @@ func (s *FileSource) Close() error {
 	return err
 }
 
+func (s *FileSource) CloseWithError(e error) error {
+	return s.Close()
+}
+
 func (s *FileSource) Read(p []byte) (n int, err error) {
 	if s.file == nil {
 		return 0, io.EOF
 	}
-	return s.file.Read(p)
+	if n, err = s.file.Read(p); n == 0 || err != nil {
+		s.file.Close()
+		s.file = nil
+	}
+	return n, err
 }
 
 type StdoutSink struct {
@@ -228,7 +274,7 @@ func (u *UnixFilter) FilterOpen() error {
 }
 
 func (u *UnixFilter) Close(inerr error) error {
-	e1 := u.source.Close()
+	e1 := u.source.CloseWithError(inerr)
 	e2 := u.sink.Close()
 	e3 := u.sink.HitError(inerr)
 	return libkb.PickFirstError(e1, e2, e3)

@@ -1,3 +1,6 @@
+// Copyright 2015 Keybase, Inc. All rights reserved. Use of
+// this source code is governed by the included BSD license.
+
 package engine
 
 import (
@@ -5,12 +8,12 @@ import (
 	"strings"
 
 	"github.com/keybase/client/go/libkb"
-	// keybase_1 "github.com/keybase/client/protocol/go"
 )
 
 type PGPUpdateEngine struct {
-	selectedFingerprints map[string]bool
-	all                  bool
+	selectedFingerprints   map[string]bool
+	all                    bool
+	duplicatedFingerprints []libkb.PGPFingerprint
 	libkb.Contextified
 }
 
@@ -61,10 +64,8 @@ func (e *PGPUpdateEngine) Run(ctx *Context) error {
 		return fmt.Errorf("You have more than one PGP key. To update all of them, use --all.")
 	}
 
-	gpgCLI := libkb.NewGpgCLI(libkb.GpgCLIArg{
-		LogUI: ctx.LogUI,
-	})
-	_, err = gpgCLI.Configure()
+	gpgCLI := libkb.NewGpgCLI(e.G(), ctx.LogUI)
+	err = gpgCLI.Configure()
 	if err != nil {
 		return err
 	}
@@ -73,6 +74,7 @@ func (e *PGPUpdateEngine) Run(ctx *Context) error {
 		DelegationType: libkb.PGPUpdateType,
 		Me:             me,
 		Expire:         libkb.KeyExpireIn,
+		Contextified:   libkb.NewContextified(e.G()),
 	}
 
 	err = del.LoadSigningKey(ctx.LoginContext, ctx.SecretUI)
@@ -98,12 +100,14 @@ func (e *PGPUpdateEngine) Run(ctx *Context) error {
 			}
 		}
 
+		bundle.InitGPGKey()
 		del.NewKey = bundle
 
 		ctx.LogUI.Info("Posting update for key %s.", fingerprint.String())
 		if err := del.Run(ctx.LoginContext); err != nil {
 			if appStatusErr, ok := err.(libkb.AppStatusError); ok && appStatusErr.Code == libkb.SCKeyDuplicateUpdate {
 				ctx.LogUI.Info("Key was already up to date.")
+				e.duplicatedFingerprints = append(e.duplicatedFingerprints, fingerprint)
 				continue
 			}
 			return err

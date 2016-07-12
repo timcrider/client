@@ -1,3 +1,6 @@
+// Copyright 2015 Keybase, Inc. All rights reserved. Use of
+// this source code is governed by the included BSD license.
+
 // +build darwin dragonfly freebsd linux nacl netbsd openbsd solaris
 
 package pinentry
@@ -6,6 +9,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 
 	"github.com/keybase/client/go/logger"
 )
@@ -90,7 +94,7 @@ func FindPinentry(log logger.Logger) (string, error) {
 
 	for _, ep := range extraPaths {
 		for _, c := range cmds {
-			full := ep + "/" + c
+			full := filepath.Join(ep, c)
 			if checkFull(full) {
 				return full, nil
 			}
@@ -99,4 +103,8 @@ func FindPinentry(log logger.Logger) (string, error) {
 
 	log.Debug("- FindPinentry: none found")
 	return "", fmt.Errorf("No pinentry found, checked a bunch of different places")
+}
+
+func (pe *Pinentry) GetTerminalName() {
+	// Noop on all platforms but windows
 }

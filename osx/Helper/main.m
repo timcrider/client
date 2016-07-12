@@ -11,20 +11,23 @@
 #import "KBHelper.h"
 #import "KBHelperDefines.h"
 
+#define TEST 0
+
+#if TEST
+#import "KBHelperTest.h"
+#endif
+
 int main(int argc, const char *argv[]) {
 
-  NSString *version = NSBundle.mainBundle.infoDictionary[@"CFBundleShortVersionString"];
-  KBLog(@"Starting keybase.Helper: %@", version);
-
-  xpc_connection_t service = xpc_connection_create_mach_service("keybase.Helper", dispatch_get_main_queue(), XPC_CONNECTION_MACH_SERVICE_LISTENER);
-  if (!service) {
-    KBLog(@"Failed to create service.");
-    return EXIT_FAILURE;
+#if TEST
+  if (argc == 2) {
+    NSString *action = [NSString stringWithCString:argv[1] encoding:NSASCIIStringEncoding];
+    if ([action isEqualToString:@"test"]) {
+      return [KBHelperTest test];
+    }
   }
+#endif
 
-  KBHelper *helper = [[KBHelper alloc] init];
-  [helper listen:service];
-
-  dispatch_main();
+  return [KBHelper run];
 }
 

@@ -1,10 +1,13 @@
+// Copyright 2015 Keybase, Inc. All rights reserved. Use of
+// this source code is governed by the included BSD license.
+
 package engine
 
 import (
 	"testing"
 
 	"github.com/keybase/client/go/libkb"
-	"golang.org/x/crypto/openpgp"
+	"github.com/keybase/go-crypto/openpgp"
 )
 
 func doUpdate(fingerprints []string, all bool, fu *FakeUser, tc libkb.TestContext) (err error) {
@@ -58,16 +61,14 @@ func TestPGPUpdate(t *testing.T) {
 	// Modify the key by deleting the subkey.
 	bundle.Subkeys = []openpgp.Subkey{}
 
-	gpgCLI := libkb.NewGpgCLI(libkb.GpgCLIArg{
-		LogUI: tc.G.UI.GetLogUI(),
-	})
-	_, err := gpgCLI.Configure()
+	gpgCLI := libkb.NewGpgCLI(tc.G, tc.G.UI.GetLogUI())
+	err := gpgCLI.Configure()
 	if err != nil {
-		t.Fatal("erorr initializing GpgCLI", err)
+		t.Fatal("Error initializing GpgCLI", err)
 	}
 
 	// Add the modified key to the gpg keyring
-	if err := gpgCLI.ExportKey(*bundle); err != nil {
+	if err := gpgCLI.ExportKey(*bundle, false /* export public key only */); err != nil {
 		t.Fatal(err)
 	}
 

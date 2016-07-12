@@ -1,3 +1,6 @@
+// Copyright 2015 Keybase, Inc. All rights reserved. Use of
+// this source code is governed by the included BSD license.
+
 package client
 
 import (
@@ -95,6 +98,8 @@ func HasColor() bool {
 		"":        true,
 		"default": true,
 		"fancy":   true,
+		"file":    false,
+		"plain":   false,
 	}
 	return logFormatHasColor[G.Env.GetLogFormat()]
 }

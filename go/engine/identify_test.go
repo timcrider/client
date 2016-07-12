@@ -1,3 +1,6 @@
+// Copyright 2015 Keybase, Inc. All rights reserved. Use of
+// this source code is governed by the included BSD license.
+
 package engine
 
 import "testing"
@@ -28,7 +31,6 @@ var idtests = []idtest{
 }
 
 func TestIdentify(t *testing.T) {
-	t.Skip("github currently broken for kbtester1.  skipping this test until fixed.")
 	tc := SetupEngineTest(t, "Identify")
 	defer tc.Cleanup()
 
@@ -46,7 +48,6 @@ func TestIdentify(t *testing.T) {
 }
 
 func TestIdentifyWithTracking(t *testing.T) {
-	t.Skip("github currently broken for kbtester1.  skipping this test until fixed.")
 	tc := SetupEngineTest(t, "Identify")
 	defer tc.Cleanup()
 

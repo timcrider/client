@@ -1,3 +1,6 @@
+// Copyright 2015 Keybase, Inc. All rights reserved. Use of
+// this source code is governed by the included BSD license.
+
 // +build darwin
 
 package pinentry
@@ -8,7 +11,7 @@ import (
 	"fmt"
 	"os"
 
-	kc "github.com/keybase/go-osxkeychain"
+	"github.com/keybase/go-keychain"
 )
 
 const (
@@ -75,11 +78,36 @@ func (pi *pinentryInstance) shouldStoreSecret(info pinentrySecretStoreInfo) bool
 	// up saying that the client wants to access the user's
 	// keychain. But this will do for now until we write our own
 	// pinentry.
-	attributes := kc.GenericPasswordAttributes{
-		ServiceName: pinentryServiceName,
-		AccountName: string(info),
+	query := keychain.NewItem()
+	query.SetSecClass(keychain.SecClassGenericPassword)
+	query.SetService(pinentryServiceName)
+	query.SetAccount(string(info))
+	query.SetMatchLimit(keychain.MatchLimitOne)
+
+	// We need to query and delete by item reference because the
+	// OSX keychain API only allows us to delete unowned items
+	// this way.
+	query.SetReturnRef(true)
+	ref, err := keychain.QueryItemRef(query)
+	if err != nil {
+		// Default to false if there was an error.
+		return false
 	}
-	return (kc.FindAndRemoveGenericPassword(&attributes) == nil)
+	if ref == nil {
+		// If not found, return false.
+		return false
+	}
+
+	defer keychain.Release(ref)
+
+	err = keychain.DeleteItemRef(ref)
+	if err != nil {
+		// Default to false if there was an error deleting.
+		return false
+	}
+
+	// Entry was found and deleted.
+	return true
 }
 
 func HasWindows() bool {

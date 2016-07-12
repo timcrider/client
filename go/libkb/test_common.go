@@ -1,14 +1,27 @@
+// Copyright 2015 Keybase, Inc. All rights reserved. Use of
+// this source code is governed by the included BSD license.
+
+// +build !production
+
 package libkb
 
 import (
+	"crypto/rand"
+	"encoding/hex"
+	"fmt"
 	"io/ioutil"
 	"os"
 	"path"
+	"path/filepath"
+	"runtime"
 	"sync"
 	"testing"
 
+	"golang.org/x/net/context"
+
 	"github.com/keybase/client/go/logger"
-	keybase1 "github.com/keybase/client/protocol/go"
+	keybase1 "github.com/keybase/client/go/protocol"
+	"github.com/keybase/gregor"
 )
 
 // TestConfig tracks libkb config during a test
@@ -24,7 +37,7 @@ func (c *TestConfig) InitTest(t *testing.T, initConfig string) {
 
 	var f *os.File
 	var err error
-	if f, err = ioutil.TempFile("/tmp/", "testconfig"); err != nil {
+	if f, err = ioutil.TempFile(os.TempDir(), "testconfig"); err != nil {
 		t.Fatalf("couldn't create temp file: %s", err)
 	}
 	c.configFileName = f.Name()
@@ -71,21 +84,27 @@ type TestContext struct {
 	G          *GlobalContext
 	PrevGlobal *GlobalContext
 	Tp         TestParameters
-	T          *testing.T
+	// TODO: Rename this to TB.
+	T testing.TB
 }
 
 func (tc *TestContext) Cleanup() {
 	if len(tc.Tp.Home) > 0 {
-		G.Log.Debug("cleaning up %s", tc.Tp.Home)
+		tc.G.Log.Debug("global context shutdown:")
+		tc.G.Log.Debug("cleaning up %s", tc.Tp.Home)
 		tc.G.Shutdown()
+		tc.G.Log.Debug("cleaning up %s", tc.Tp.Home)
 		os.RemoveAll(tc.Tp.Home)
+		tc.G.Log.Debug("clearing stored secrets:")
+		tc.ClearAllStoredSecrets()
 	}
+	tc.G.Log.Debug("cleanup complete")
 }
 
 func (tc TestContext) MoveGpgKeyringTo(dst TestContext) error {
 
 	mv := func(f string) (err error) {
-		return os.Rename(path.Join(tc.Tp.GPGHome, f), path.Join(dst.Tp.GPGHome, f))
+		return os.Rename(path.Join(tc.Tp.GPGHome, f), filepath.Join(dst.Tp.GPGHome, f))
 	}
 
 	if err := mv("secring.gpg"); err != nil {
@@ -138,7 +157,7 @@ func (tc *TestContext) MakePGPKey(id string) (*PGPKeyBundle, error) {
 	}
 	arg.Init()
 	arg.CreatePGPIDs()
-	return GeneratePGPKeyBundle(arg, tc.G.UI.GetLogUI())
+	return GeneratePGPKeyBundle(tc.G, arg, tc.G.UI.GetLogUI())
 }
 
 // ResetLoginStateForTest simulates a shutdown and restart (for client
@@ -148,18 +167,49 @@ func (tc *TestContext) ResetLoginState() {
 	tc.G.createLoginState()
 }
 
+func (tc TestContext) ClearAllStoredSecrets() error {
+	usernames, err := tc.G.GetUsersWithStoredSecrets()
+	if err != nil {
+		return err
+	}
+	for _, username := range usernames {
+		nu := NewNormalizedUsername(username)
+		err = ClearStoredSecret(tc.G, nu)
+		if err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 var setupTestMu sync.Mutex
 
-func setupTestContext(t *testing.T, nm string) (tc TestContext, err error) {
+func setupTestContext(tb testing.TB, name string, tcPrev *TestContext) (tc TestContext, err error) {
 	setupTestMu.Lock()
 	defer setupTestMu.Unlock()
 
 	g := NewGlobalContext()
-	g.Log = logger.NewTestLogger(t)
+
+	// In debugging mode, dump all log, don't use the test logger.
+	// We only use the environment variable to discover debug mode
+	if val, _ := getEnvBool("KEYBASE_DEBUG"); !val {
+		g.Log = logger.NewTestLogger(tb)
+	}
+
+	buf := make([]byte, 5)
+	if _, err = rand.Read(buf); err != nil {
+		return
+	}
+	// Uniquify name, since multiple tests may use the same name.
+	name = fmt.Sprintf("%s %s", name, hex.EncodeToString(buf))
+
 	g.Init()
+	g.Log.Debug("SetupTest %s", name)
 
 	// Set up our testing parameters.  We might add others later on
-	if tc.Tp.Home, err = ioutil.TempDir(os.TempDir(), nm); err != nil {
+	if tcPrev != nil {
+		tc.Tp = tcPrev.Tp
+	} else if tc.Tp.Home, err = ioutil.TempDir(os.TempDir(), name); err != nil {
 		return
 	}
 
@@ -169,6 +219,8 @@ func setupTestContext(t *testing.T, nm string) (tc TestContext, err error) {
 
 	tc.Tp.Debug = false
 	tc.Tp.Devel = true
+	tc.Tp.DevelName = name
+
 	g.Env.Test = tc.Tp
 
 	g.ConfigureLogging()
@@ -176,6 +228,10 @@ func setupTestContext(t *testing.T, nm string) (tc TestContext, err error) {
 	if err = g.ConfigureAPI(); err != nil {
 		return
 	}
+
+	// use stub engine for external api
+	g.XAPI = NewStubAPIEngine()
+
 	if err = g.ConfigureConfig(); err != nil {
 		return
 	}
@@ -196,42 +252,76 @@ func setupTestContext(t *testing.T, nm string) (tc TestContext, err error) {
 		return
 	}
 
+	g.GregorDismisser = &FakeGregorDismisser{}
+
 	tc.PrevGlobal = G
 	G = g
 	tc.G = g
+	tc.T = tb
+
+	if G.SecretStoreAll == nil {
+		G.SecretStoreAll = NewTestSecretStoreAll(G, G)
+	}
 
 	return
 }
 
-func SetupTest(t *testing.T, nm string) (tc TestContext) {
-	G.Log.Debug("SetupTest %s", nm)
+func SetupTest(tb testing.TB, name string, depth int) (tc TestContext) {
 	var err error
-	tc, err = setupTestContext(t, nm)
+	tc, err = setupTestContext(tb, name, nil)
 	if err != nil {
-		t.Fatal(err)
+		tb.Fatal(err)
 	}
-	tc.T = t
-
+	if os.Getenv("KEYBASE_LOG_SETUPTEST_FUNCS") != "" {
+		pc, file, line, ok := runtime.Caller(depth)
+		if ok {
+			fn := runtime.FuncForPC(pc)
+			fmt.Fprintf(os.Stderr, "- SetupTest %s %s:%d\n", filepath.Base(fn.Name()), filepath.Base(file), line)
+		}
+	}
 	return tc
+}
+
+func (tc *TestContext) SetRuntimeDir(s string) {
+	tc.Tp.RuntimeDir = s
+	tc.G.Env.Test.RuntimeDir = s
+}
+
+func (tc TestContext) Clone() (ret TestContext) {
+	var err error
+	ret, err = setupTestContext(tc.T, "", &tc)
+	if err != nil {
+		tc.T.Fatal(err)
+	}
+	return ret
 }
 
 type nullui struct {
 	gctx *GlobalContext
 }
 
-func (n *nullui) GetDoctorUI() DoctorUI {
-	return nil
+func (n *nullui) Printf(f string, args ...interface{}) (int, error) {
+	return fmt.Printf(f, args...)
 }
+
+func (n *nullui) PrintfStderr(f string, args ...interface{}) (int, error) {
+	return fmt.Fprintf(os.Stderr, f, args...)
+}
+
+func (n *nullui) GetDumbOutputUI() DumbOutputUI {
+	return n
+}
+
 func (n *nullui) GetIdentifyUI() IdentifyUI {
 	return nil
 }
-func (n *nullui) GetIdentifySelfUI() IdentifyUI {
-	return nil
-}
-func (n *nullui) GetIdentifyTrackUI(strict bool) IdentifyUI {
+func (n *nullui) GetIdentifyTrackUI() IdentifyUI {
 	return nil
 }
 func (n *nullui) GetLoginUI() LoginUI {
+	return nil
+}
+func (n *nullui) GetTerminalUI() TerminalUI {
 	return nil
 }
 func (n *nullui) GetSecretUI() SecretUI {
@@ -246,13 +336,16 @@ func (n *nullui) GetGPGUI() GPGUI {
 func (n *nullui) GetLogUI() LogUI {
 	return n.gctx.Log
 }
-func (n *nullui) GetLocksmithUI() LocksmithUI {
+func (n *nullui) GetPgpUI() PgpUI {
+	return nil
+}
+func (n *nullui) GetProvisionUI(KexRole) ProvisionUI {
 	return nil
 }
 func (n *nullui) Prompt(string, bool, Checker) (string, error) {
 	return "", nil
 }
-func (n *nullui) GetIdentifyLubaUI() IdentifyUI {
+func (n *nullui) PromptForConfirmation(prompt string) error {
 	return nil
 }
 func (n *nullui) Configure() error {
@@ -263,56 +356,66 @@ func (n *nullui) Shutdown() error {
 }
 
 type TestSecretUI struct {
-	Passphrase             string
-	BackupPassphrase       string
-	StoreSecret            bool
-	CalledGetSecret        bool
-	CalledGetKBPassphrase  bool
-	CalledGetBUPassphrase  bool
-	CalledGetNewPassphrase bool
+	Passphrase          string
+	StoreSecret         bool
+	CalledGetPassphrase bool
 }
 
-func (t *TestSecretUI) GetSecret(p keybase1.SecretEntryArg, terminal *keybase1.SecretEntryArg) (*keybase1.SecretEntryRes, error) {
-	t.CalledGetSecret = true
-	return &keybase1.SecretEntryRes{
-		Text:        t.Passphrase,
-		Canceled:    false,
-		StoreSecret: p.UseSecretStore && t.StoreSecret,
+func (t *TestSecretUI) GetPassphrase(p keybase1.GUIEntryArg, terminal *keybase1.SecretEntryArg) (keybase1.GetPassphraseRes, error) {
+	t.CalledGetPassphrase = true
+	return keybase1.GetPassphraseRes{
+		Passphrase:  t.Passphrase,
+		StoreSecret: p.Features.StoreSecret.Allow && t.StoreSecret,
 	}, nil
 }
 
-func (t *TestSecretUI) GetNewPassphrase(keybase1.GetNewPassphraseArg) (keybase1.GetNewPassphraseRes, error) {
-	t.CalledGetNewPassphrase = true
-	return keybase1.GetNewPassphraseRes{Passphrase: t.Passphrase}, nil
+type TestCancelSecretUI struct {
+	CallCount int
 }
 
-func (t *TestSecretUI) GetKeybasePassphrase(keybase1.GetKeybasePassphraseArg) (string, error) {
-	t.CalledGetKBPassphrase = true
-	return t.Passphrase, nil
-}
-
-func (t *TestSecretUI) GetPaperKeyPassphrase(keybase1.GetPaperKeyPassphraseArg) (string, error) {
-	t.CalledGetBUPassphrase = true
-	return t.BackupPassphrase, nil
+func (t *TestCancelSecretUI) GetPassphrase(_ keybase1.GUIEntryArg, _ *keybase1.SecretEntryArg) (keybase1.GetPassphraseRes, error) {
+	t.CallCount++
+	return keybase1.GetPassphraseRes{}, InputCanceledError{}
 }
 
 type TestLoginUI struct {
-	Username     string
-	RevokeBackup bool
+	Username                 string
+	RevokeBackup             bool
+	CalledGetEmailOrUsername int
 }
 
-func (t TestLoginUI) GetEmailOrUsername(dummy int) (string, error) {
+func (t *TestLoginUI) GetEmailOrUsername(_ context.Context, _ int) (string, error) {
+	t.CalledGetEmailOrUsername++
 	return t.Username, nil
 }
 
-func (t TestLoginUI) PromptRevokePaperKeys(arg keybase1.PromptRevokePaperKeysArg) (bool, error) {
+func (t *TestLoginUI) PromptRevokePaperKeys(_ context.Context, arg keybase1.PromptRevokePaperKeysArg) (bool, error) {
 	return t.RevokeBackup, nil
 }
 
-func (t TestLoginUI) DisplayPaperKeyPhrase(arg keybase1.DisplayPaperKeyPhraseArg) error {
+func (t *TestLoginUI) DisplayPaperKeyPhrase(_ context.Context, arg keybase1.DisplayPaperKeyPhraseArg) error {
 	return nil
 }
 
-func (t TestLoginUI) DisplayPrimaryPaperKey(arg keybase1.DisplayPrimaryPaperKeyArg) error {
+func (t *TestLoginUI) DisplayPrimaryPaperKey(_ context.Context, arg keybase1.DisplayPrimaryPaperKeyArg) error {
+	return nil
+}
+
+type TestLoginCancelUI struct {
+	TestLoginUI
+}
+
+func (t *TestLoginCancelUI) GetEmailOrUsername(_ context.Context, _ int) (string, error) {
+	return "", InputCanceledError{}
+}
+
+type FakeGregorDismisser struct {
+	dismissedIDs []gregor.MsgID
+}
+
+var _ GregorDismisser = (*FakeGregorDismisser)(nil)
+
+func (f *FakeGregorDismisser) DismissItem(id gregor.MsgID) error {
+	f.dismissedIDs = append(f.dismissedIDs, id)
 	return nil
 }

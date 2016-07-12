@@ -1,3 +1,6 @@
+// Copyright 2015 Keybase, Inc. All rights reserved. Use of
+// this source code is governed by the included BSD license.
+
 package libkb
 
 import (
@@ -8,10 +11,10 @@ import (
 	"io/ioutil"
 	"strings"
 
-	keybase1 "github.com/keybase/client/protocol/go"
+	keybase1 "github.com/keybase/client/go/protocol"
+	"github.com/keybase/go-crypto/openpgp"
+	"github.com/keybase/go-crypto/openpgp/armor"
 	jsonw "github.com/keybase/go-jsonw"
-	"golang.org/x/crypto/openpgp"
-	"golang.org/x/crypto/openpgp/armor"
 )
 
 func ComputeSigIDFromSigBody(body []byte) keybase1.SigID {
@@ -35,7 +38,7 @@ type ParsedSig struct {
 
 func PGPOpenSig(armored string) (ps *ParsedSig, err error) {
 	pso := ParsedSig{}
-	pso.Block, err = armor.Decode(strings.NewReader(armored))
+	pso.Block, err = armor.Decode(strings.NewReader(cleanPGPInput(armored)))
 	if err != nil {
 		return
 	}
@@ -134,7 +137,7 @@ func (ps *ParsedSig) Verify(k PGPKeyBundle) (err error) {
 		return
 	}
 
-	if ps.MD.Signature == nil {
+	if ps.MD.Signature == nil && ps.MD.SignatureV3 == nil {
 		err = fmt.Errorf("No available signature after checking signature")
 		return
 	}

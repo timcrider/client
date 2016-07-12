@@ -1,15 +1,18 @@
+// Copyright 2015 Keybase, Inc. All rights reserved. Use of
+// this source code is governed by the included BSD license.
+
 package libkb
 
 import (
 	"crypto"
-	"crypto/rsa"
 	"fmt"
 	"strings"
 
-	"golang.org/x/crypto/openpgp"
-	"golang.org/x/crypto/openpgp/errors"
-	"golang.org/x/crypto/openpgp/packet"
-	"golang.org/x/crypto/openpgp/s2k"
+	"github.com/keybase/go-crypto/openpgp"
+	"github.com/keybase/go-crypto/openpgp/errors"
+	"github.com/keybase/go-crypto/openpgp/packet"
+	"github.com/keybase/go-crypto/openpgp/s2k"
+	"github.com/keybase/go-crypto/rsa"
 )
 
 type PGPGenArg struct {
@@ -18,7 +21,6 @@ type PGPGenArg struct {
 	Ids             Identities
 	Config          *packet.Config
 	PGPUids         []string
-	NoDefPGPUid     bool
 	PrimaryLifetime int
 	SubkeyLifetime  int
 }
@@ -38,7 +40,7 @@ func ui32p(i int) *uint32 {
 //
 // Modification of: https://code.google.com/p/go/source/browse/openpgp/keys.go?repo=crypto&r=8fec09c61d5d66f460d227fd1df3473d7e015bc6#456
 //  From golang.com/x/crypto/openpgp/keys.go
-func GeneratePGPKeyBundle(arg PGPGenArg, logUI LogUI) (*PGPKeyBundle, error) {
+func GeneratePGPKeyBundle(g *GlobalContext, arg PGPGenArg, logUI LogUI) (*PGPKeyBundle, error) {
 	currentTime := arg.Config.Now()
 
 	if len(arg.Ids) == 0 {
@@ -129,7 +131,7 @@ func GeneratePGPKeyBundle(arg PGPGenArg, logUI LogUI) (*PGPKeyBundle, error) {
 	e.Subkeys[0].PrivateKey.IsSubkey = true
 	e.Subkeys[0].Sig.KeyLifetimeSecs = ui32p(arg.SubkeyLifetime)
 
-	return NewPGPKeyBundle(e), nil
+	return NewGeneratedPGPKeyBundle(g, e), nil
 }
 
 // CreateIDs creates identities for KeyGenArg.Ids if none exist.
@@ -153,13 +155,12 @@ func (a *PGPGenArg) CreatePGPIDs() error {
 	return nil
 }
 
+// Just for testing
 func (a *PGPGenArg) AddDefaultUID() {
-	if a.NoDefPGPUid {
-		return
-	}
 	a.Ids = append(a.Ids, KeybaseIdentity(""))
 }
 
+// Just for testing
 func (a *PGPGenArg) MakeAllIds() error {
 	if err := a.CreatePGPIDs(); err != nil {
 		return err

@@ -1,20 +1,24 @@
+// Copyright 2015 Keybase, Inc. All rights reserved. Use of
+// this source code is governed by the included BSD license.
+
 package engine
 
 import (
+	"errors"
 	"fmt"
 
 	"github.com/keybase/client/go/libkb"
-	keybase1 "github.com/keybase/client/protocol/go"
+	keybase1 "github.com/keybase/client/go/protocol"
 )
 
 type RevokeSigsEngine struct {
 	libkb.Contextified
-	sigIDs []keybase1.SigID
+	sigIDQueries []string
 }
 
-func NewRevokeSigsEngine(sigIDs []keybase1.SigID, g *libkb.GlobalContext) *RevokeSigsEngine {
+func NewRevokeSigsEngine(sigIDQueries []string, g *libkb.GlobalContext) *RevokeSigsEngine {
 	return &RevokeSigsEngine{
-		sigIDs:       sigIDs,
+		sigIDQueries: sigIDQueries,
 		Contextified: libkb.NewContextified(g),
 	}
 }
@@ -25,7 +29,7 @@ func (e *RevokeSigsEngine) Name() string {
 
 func (e *RevokeSigsEngine) Prereqs() Prereqs {
 	return Prereqs{
-		Session: true,
+		Device: true,
 	}
 }
 
@@ -41,16 +45,16 @@ func (e *RevokeSigsEngine) SubConsumers() []libkb.UIConsumer {
 }
 
 func (e *RevokeSigsEngine) getSigIDsToRevoke(me *libkb.User) ([]keybase1.SigID, error) {
-	ret := make([]keybase1.SigID, len(e.sigIDs))
-	copy(ret, e.sigIDs)
-	for _, sigID := range ret {
-		valid, err := me.IsSigIDActive(sigID)
+	ret := make([]keybase1.SigID, len(e.sigIDQueries))
+	for i, query := range e.sigIDQueries {
+		if len(query) < keybase1.SigIDQueryMin {
+			return nil, errors.New("sigID query too short")
+		}
+		sigID, err := me.SigIDSearch(query)
 		if err != nil {
 			return nil, err
 		}
-		if !valid {
-			return nil, fmt.Errorf("Signature '%s' does not exist.", sigID)
-		}
+		ret[i] = sigID
 	}
 	return ret, nil
 }
@@ -66,10 +70,11 @@ func (e *RevokeSigsEngine) Run(ctx *Context) error {
 		return err
 	}
 
-	sigKey, _, err := e.G().Keyrings.GetSecretKeyWithPrompt(ctx.LoginContext, libkb.SecretKeyArg{
+	ska := libkb.SecretKeyArg{
 		Me:      me,
 		KeyType: libkb.DeviceSigningKeyType,
-	}, ctx.SecretUI, "to revoke a signature")
+	}
+	sigKey, err := e.G().Keyrings.GetSecretKeyWithPrompt(ctx.SecretKeyPromptArg(ska, "to revoke a signature"))
 	if sigKey == nil {
 		return fmt.Errorf("Revocation signing key is nil.")
 	}
@@ -96,5 +101,6 @@ func (e *RevokeSigsEngine) Run(ctx *Context) error {
 	if err != nil {
 		return err
 	}
+
 	return nil
 }

@@ -1,3 +1,6 @@
+// Copyright 2015 Keybase, Inc. All rights reserved. Use of
+// this source code is governed by the included BSD license.
+
 package libkb
 
 import (
@@ -6,16 +9,20 @@ import (
 	"sync"
 
 	"github.com/syndtr/goleveldb/leveldb"
+	errors "github.com/syndtr/goleveldb/leveldb/errors"
 )
 
 type LevelDb struct {
 	db       *leveldb.DB
 	filename string
 	sync.Mutex
+	Contextified
 }
 
-func NewLevelDb() *LevelDb {
-	return &LevelDb{}
+func NewLevelDb(g *GlobalContext) *LevelDb {
+	return &LevelDb{
+		Contextified: NewContextified(g),
+	}
 }
 
 // Explicit open does nothing we'll wait for a lazy open
@@ -27,9 +34,22 @@ func (l *LevelDb) open() error {
 
 	var err error
 	if l.db == nil {
+		l.G().Log.Debug("+ LevelDb.open")
 		fn := l.GetFilename()
-		G.Log.Debug("Opening LevelDB for local cache: %s", fn)
+		l.G().Log.Debug("| Opening LevelDB for local cache: %v %s", l, fn)
 		l.db, err = leveldb.OpenFile(fn, nil)
+		if err != nil {
+			if _, ok := err.(*errors.ErrCorrupted); ok {
+				l.G().Log.Debug("| LevelDB was corrupted; attempting recovery (%v)", err)
+				l.db, err = leveldb.RecoverFile(fn, nil)
+				if err != nil {
+					l.G().Log.Debug("| Recovery failed: %v", err)
+				} else {
+					l.G().Log.Debug("| Recovery succeeded!")
+				}
+			}
+		}
+		l.G().Log.Debug("- LevelDb.open -> %s", ErrToOk(err))
 	}
 	return err
 }
@@ -43,7 +63,8 @@ func (l *LevelDb) ForceOpen() error {
 
 func (l *LevelDb) GetFilename() string {
 	if len(l.filename) == 0 {
-		l.filename = G.Env.GetDbFilename()
+		l.G().Log.Debug("data dir: %s", l.G().Env.GetDataDir())
+		l.filename = l.G().Env.GetDbFilename()
 	}
 	return l.filename
 }
@@ -60,24 +81,24 @@ func (l *LevelDb) close(doLock bool) error {
 
 	var err error
 	if l.db != nil {
-		G.Log.Debug("Closing LevelDB local cache: %s", l.GetFilename())
+		l.G().Log.Debug("Closing LevelDB local cache: %s", l.GetFilename())
 		err = l.db.Close()
 		l.db = nil
 	}
 	return err
 }
 
-func (l *LevelDb) Nuke() error {
+func (l *LevelDb) Nuke() (string, error) {
 	l.Lock()
 	defer l.Unlock()
 
 	err := l.close(false)
 	if err == nil {
 		fn := l.GetFilename()
-		G.Log.Warning("Nuking database %s", fn)
 		err = os.RemoveAll(fn)
+		return fn, err
 	}
-	return err
+	return "", err
 }
 
 func (l *LevelDb) Put(id DbKey, aliases []DbKey, value []byte) error {

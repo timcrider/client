@@ -1,59 +1,56 @@
+// Copyright 2015 Keybase, Inc. All rights reserved. Use of
+// this source code is governed by the included BSD license.
+
 package libkb
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"io"
+	"os"
 	"os/exec"
+	"strings"
 	"sync"
+
+	"github.com/blang/semver"
 )
 
 type GpgCLI struct {
+	Contextified
 	path    string
 	options []string
-
-	// Configuration --- cache the results
-	configured     bool
-	configExplicit bool
-	configError    error
+	version string
+	tty     string
 
 	mutex *sync.Mutex
 
 	logUI LogUI
 }
 
-type GpgCLIArg struct {
-	LogUI LogUI // If nil, use the global
-}
-
-func NewGpgCLI(arg GpgCLIArg) *GpgCLI {
-	logUI := arg.LogUI
+func NewGpgCLI(g *GlobalContext, logUI LogUI) *GpgCLI {
 	if logUI == nil {
-		logUI = G.Log
+		logUI = g.Log
 	}
 	return &GpgCLI{
-		configured: false,
-		mutex:      new(sync.Mutex),
-		logUI:      logUI,
+		Contextified: NewContextified(g),
+		mutex:        new(sync.Mutex),
+		logUI:        logUI,
 	}
 }
 
-func (g *GpgCLI) Configure() (configExplicit bool, err error) {
+func (g *GpgCLI) SetTTY(t string) {
+	g.tty = t
+}
+
+func (g *GpgCLI) Configure() (err error) {
 
 	g.mutex.Lock()
 	defer g.mutex.Unlock()
 
-	if g.configured {
-		configExplicit = g.configExplicit
-		err = g.configError
-		return
-	}
-
 	prog := G.Env.GetGpg()
 	opts := G.Env.GetGpgOptions()
 
-	// If we asked for any explicit GPG options
-	configExplicit = (len(prog) > 0 || opts != nil)
 	if len(prog) > 0 {
 		err = canExec(prog)
 	} else {
@@ -62,57 +59,47 @@ func (g *GpgCLI) Configure() (configExplicit bool, err error) {
 			prog, err = exec.LookPath("gpg")
 		}
 	}
+	if err != nil {
+		return err
+	}
 
 	g.logUI.Debug("| configured GPG w/ path: %s", prog)
 
 	g.path = prog
 	g.options = opts
-	g.configured = true
-	g.configExplicit = configExplicit
-	g.configError = err
 
 	return
 }
 
 // CanExec returns true if a gpg executable exists.
 func (g *GpgCLI) CanExec() (bool, error) {
-	if _, err := g.Configure(); err != nil {
-		if oerr, ok := err.(*exec.Error); ok {
-			if oerr.Err == exec.ErrNotFound {
-				return false, nil
-			}
-		}
+	err := g.Configure()
+	if IsExecError(err) {
+		return false, nil
+	}
+	if err != nil {
 		return false, err
 	}
 	return true, nil
 }
 
-// Path returns the path of the gpg executable.  Configure must be
-// called before using this.
+// Path returns the path of the gpg executable.
+// Path is only available if CanExec() is true.
 func (g *GpgCLI) Path() string {
-	if !g.configured {
-		panic("GpgCLI not configured")
+	canExec, err := g.CanExec()
+	if err == nil && canExec {
+		return g.path
 	}
-	return g.path
+	return ""
 }
 
-type RunGpgArg struct {
-	Arguments []string
-	Stdin     bool
-	Stderr    io.WriteCloser
-	Stdout    io.WriteCloser
-}
-
-type RunGpgRes struct {
-	Stdin io.WriteCloser
-	Err   error
-	Wait  func() error
-}
-
-func (g *GpgCLI) ImportKey(secret bool, fp PGPFingerprint) (ret *PGPKeyBundle, err error) {
+func (g *GpgCLI) ImportKey(secret bool, fp PGPFingerprint) (*PGPKeyBundle, error) {
+	g.outputVersion()
 	var cmd string
+	var which string
 	if secret {
 		cmd = "--export-secret-key"
+		which = "secret "
 	} else {
 		cmd = "--export"
 	}
@@ -131,18 +118,43 @@ func (g *GpgCLI) ImportKey(secret bool, fp PGPFingerprint) (ret *PGPKeyBundle, e
 	buf.ReadFrom(res.Stdout)
 	armored := buf.String()
 
-	if err = res.Wait(); err != nil {
+	// Convert to posix style on windows
+	armored = PosixLineEndings(armored)
+
+	if err := res.Wait(); err != nil {
 		return nil, err
 	}
 
 	if len(armored) == 0 {
-		return nil, NoKeyError{fmt.Sprintf("No key found for %s", fp)}
+		return nil, NoKeyError{fmt.Sprintf("No %skey found for fingerprint %s", which, fp)}
 	}
 
-	return ReadOneKeyFromString(armored)
+	bundle, w, err := ReadOneKeyFromString(armored)
+	w.Warn(g.G())
+	if err != nil {
+		return nil, err
+	}
+
+	// For secret keys, *also* import the key in public mode, and then grab the
+	// ArmoredPublicKey from that. That's because the public import goes out of
+	// its way to preserve the exact armored string from GPG.
+	if secret {
+		publicBundle, err := g.ImportKey(false, fp)
+		if err != nil {
+			return nil, err
+		}
+		bundle.ArmoredPublicKey = publicBundle.ArmoredPublicKey
+
+		// It's a bug that gpg --export-secret-keys doesn't grep subkey revocations.
+		// No matter, we have both in-memory, so we can copy it over here
+		bundle.CopySubkeyRevocations(publicBundle.Entity)
+	}
+
+	return bundle, nil
 }
 
-func (g *GpgCLI) ExportKey(k PGPKeyBundle) (err error) {
+func (g *GpgCLI) ExportKey(k PGPKeyBundle, private bool) (err error) {
+	g.outputVersion()
 	arg := RunGpg2Arg{
 		Arguments: []string{"--import"},
 		Stdin:     true,
@@ -153,10 +165,91 @@ func (g *GpgCLI) ExportKey(k PGPKeyBundle) (err error) {
 		return res.Err
 	}
 
-	e1 := k.EncodeToStream(res.Stdin)
+	e1 := k.EncodeToStream(res.Stdin, private)
 	e2 := res.Stdin.Close()
 	e3 := res.Wait()
 	return PickFirstError(e1, e2, e3)
+}
+
+func (g *GpgCLI) Sign(fp PGPFingerprint, payload []byte) (string, error) {
+	g.outputVersion()
+	arg := RunGpg2Arg{
+		Arguments: []string{"--armor", "--sign", "-u", fp.String()},
+		Stdout:    true,
+		Stdin:     true,
+	}
+
+	res := g.Run2(arg)
+	if res.Err != nil {
+		return "", res.Err
+	}
+
+	res.Stdin.Write(payload)
+	res.Stdin.Close()
+
+	buf := new(bytes.Buffer)
+	buf.ReadFrom(res.Stdout)
+	armored := buf.String()
+
+	// Convert to posix style on windows
+	armored = PosixLineEndings(armored)
+
+	if err := res.Wait(); err != nil {
+		return "", err
+	}
+
+	return armored, nil
+}
+
+func (g *GpgCLI) Version() (string, error) {
+	if len(g.version) > 0 {
+		return g.version, nil
+	}
+
+	args := append(g.options, "--version")
+	out, err := exec.Command(g.path, args...).Output()
+	if err != nil {
+		return "", err
+	}
+	g.version = string(out)
+	return g.version, nil
+}
+
+func (g *GpgCLI) outputVersion() {
+	v, err := g.Version()
+	if err != nil {
+		g.logUI.Debug("error getting GPG version: %s", err)
+		return
+	}
+	g.logUI.Debug("GPG version:\n%s", v)
+}
+
+func (g *GpgCLI) SemanticVersion() (*semver.Version, error) {
+	out, err := g.Version()
+	if err != nil {
+		return nil, err
+	}
+	lines := strings.Split(out, "\n")
+	if len(lines) == 0 {
+		return nil, errors.New("empty gpg version")
+	}
+	parts := strings.Fields(lines[0])
+	if len(parts) < 3 {
+		return nil, fmt.Errorf("unhandled gpg version output %q full: %q", lines[0], lines)
+	}
+	return semver.New(parts[2])
+}
+
+func (g *GpgCLI) VersionAtLeast(s string) (bool, error) {
+	min, err := semver.New(s)
+	if err != nil {
+		return false, err
+	}
+	cur, err := g.SemanticVersion()
+	if err != nil {
+		return false, err
+	}
+	return cur.GTE(*min), nil
 }
 
 type RunGpg2Arg struct {
@@ -175,6 +268,10 @@ type RunGpg2Res struct {
 }
 
 func (g *GpgCLI) Run2(arg RunGpg2Arg) (res RunGpg2Res) {
+	if g.path == "" {
+		res.Err = errors.New("no gpg path set")
+		return
+	}
 
 	cmd := g.MakeCmd(arg.Arguments)
 
@@ -221,7 +318,7 @@ func (g *GpgCLI) Run2(arg RunGpg2Arg) (res RunGpg2Res) {
 	if !arg.Stdout {
 		out++
 		go func() {
-			ch <- DrainPipe(stdout, func(s string) { g.logUI.Info(s) })
+			ch <- DrainPipe(stdout, func(s string) { g.logUI.Debug(s) })
 		}()
 	} else {
 		res.Stdout = stdout
@@ -230,7 +327,7 @@ func (g *GpgCLI) Run2(arg RunGpg2Arg) (res RunGpg2Res) {
 	if !arg.Stderr {
 		out++
 		go func() {
-			ch <- DrainPipe(stderr, func(s string) { g.logUI.Info(s) })
+			ch <- DrainPipe(stderr, func(s string) { g.logUI.Debug(s) })
 		}()
 	} else {
 		res.Stderr = stderr
@@ -248,66 +345,13 @@ func (g *GpgCLI) MakeCmd(args []string) *exec.Cmd {
 	} else {
 		nargs = args
 	}
+	if g.G().Service {
+		nargs = append([]string{"--no-tty"}, nargs...)
+	}
 	g.logUI.Debug("| running Gpg: %s %v", g.path, nargs)
-	return exec.Command(g.path, nargs...)
-}
-
-func (g *GpgCLI) Run(arg RunGpgArg) (res RunGpgRes) {
-
-	cmd := g.MakeCmd(arg.Arguments)
-
-	waited := false
-
-	var stdout, stderr io.ReadCloser
-
-	if arg.Stdin {
-		if res.Stdin, res.Err = cmd.StdinPipe(); res.Err != nil {
-			return
-		}
+	ret := exec.Command(g.path, nargs...)
+	if g.tty != "" {
+		ret.Env = append(os.Environ(), "GPG_TTY="+g.tty)
 	}
-	if stdout, res.Err = cmd.StdoutPipe(); res.Err != nil {
-		return
-	}
-	if stderr, res.Err = cmd.StderrPipe(); res.Err != nil {
-		return
-	}
-
-	if res.Err = cmd.Start(); res.Err != nil {
-		return
-	}
-
-	waitfn := func() error {
-		if !waited {
-			waited = true
-			return cmd.Wait()
-		}
-		return nil
-	}
-
-	if arg.Stdin {
-		res.Wait = waitfn
-	} else {
-		defer waitfn()
-	}
-
-	var e1, e2, e3 error
-
-	if arg.Stdout != nil {
-		_, e1 = io.Copy(arg.Stdout, stdout)
-	} else {
-		e1 = DrainPipe(stdout, func(s string) { g.logUI.Info(s) })
-	}
-
-	if arg.Stderr != nil {
-		_, e2 = io.Copy(arg.Stderr, stderr)
-	} else {
-		e2 = DrainPipe(stderr, func(s string) { g.logUI.Warning(s) })
-	}
-
-	if !arg.Stdin {
-		e3 = waitfn()
-	}
-
-	res.Err = PickFirstError(e1, e2, e3)
-	return
+	return ret
 }

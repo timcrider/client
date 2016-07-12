@@ -1,3 +1,6 @@
+// Copyright 2015 Keybase, Inc. All rights reserved. Use of
+// this source code is governed by the included BSD license.
+
 package libkb
 
 import (
@@ -47,7 +50,7 @@ var dktests = []dktest{
 
 func TestTSPassKey(t *testing.T) {
 	for _, test := range dktests {
-		_, dk, err := StretchPassphrase(test.passphrase, []byte(test.salt))
+		_, dk, err := StretchPassphrase(nil, test.passphrase, []byte(test.salt))
 		if err != nil {
 			t.Errorf("%s: got unexpected error: %s", test.name, err)
 			continue

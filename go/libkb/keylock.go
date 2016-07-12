@@ -1,10 +1,11 @@
+// Copyright 2015 Keybase, Inc. All rights reserved. Use of
+// this source code is governed by the included BSD license.
+
 package libkb
 
-import (
-	"fmt"
+import "fmt"
 
-	keybase1 "github.com/keybase/client/protocol/go"
-)
+const WhichPassphraseKeybase = "your Keybase"
 
 type KeyUnlocker struct {
 	Tries          int
@@ -14,6 +15,7 @@ type KeyUnlocker struct {
 	UseSecretStore bool
 	UI             SecretUI
 	Unlocker       func(pw string, storeSecret bool) (ret GenericKey, err error)
+	Contextified
 }
 
 func (arg KeyUnlocker) Run() (ret GenericKey, err error) {
@@ -23,10 +25,10 @@ func (arg KeyUnlocker) Run() (ret GenericKey, err error) {
 	if len(which) == 0 {
 		which = "the"
 	}
-	desc := "Please enter " + which + " passphrase to unlock the secret key for:\n" +
+	prompt := "Please enter " + which + " passphrase to unlock the secret key for:\n" +
 		arg.KeyDesc + "\n"
 	if len(arg.Reason) > 0 {
-		desc = desc + "\nReason: " + arg.Reason
+		prompt = prompt + "\nReason: " + arg.Reason
 	}
 
 	if arg.UI == nil {
@@ -34,35 +36,27 @@ func (arg KeyUnlocker) Run() (ret GenericKey, err error) {
 		return
 	}
 
-	prompt := "Your key passphrase"
+	title := "Your Keybase Passphrase"
 
-	for i := 0; (arg.Tries <= 0 || i < arg.Tries) && ret == nil && err == nil; i++ {
-		var res *keybase1.SecretEntryRes
-		res, err = arg.UI.GetSecret(keybase1.SecretEntryArg{
-			Err:            emsg,
-			Desc:           desc,
-			Prompt:         prompt,
-			Reason:         arg.Reason,
-			UseSecretStore: arg.UseSecretStore,
-		}, nil)
-
-		if err == nil && res.Canceled {
-			err = CanceledError{"Attempt to unlock secret key entry canceled"}
-		} else if err != nil {
-			// noop
-		} else if ret, err = arg.Unlocker(res.Text, res.StoreSecret); err == nil {
-			// noop
-		} else if _, ok := err.(PassphraseError); ok {
+	for i := 0; arg.Tries <= 0 || i < arg.Tries; i++ {
+		res, err := GetSecret(arg.G(), arg.UI, title, prompt, emsg, arg.UseSecretStore)
+		if err != nil {
+			// probably canceled
+			return nil, err
+		}
+		ret, err = arg.Unlocker(res.Passphrase, res.StoreSecret)
+		if err == nil {
+			// success
+			return ret, nil
+		}
+		if _, ok := err.(PassphraseError); ok {
+			// keep trying
 			emsg = "Failed to unlock key; bad passphrase"
-			err = nil
+		} else {
+			// unretryable error
+			return nil, err
 		}
 	}
 
-	if ret == nil && err == nil {
-		err = fmt.Errorf("Too many failures; giving up")
-	}
-	if err != nil {
-		ret = nil
-	}
-	return
+	return nil, fmt.Errorf("Too many failures; giving up")
 }

@@ -1,38 +1,25 @@
-platform :osx, "10.8"
-
-target "Keybase" do
-  pod "Sparkle"
+target "Installer" do
+  platform :osx, "10.10"
+  pod "ObjectiveSugar"
+  pod "GBCli"
+  pod "Slash"
+  pod "MPMessagePack"
+  pod "KBKit", :path => "KBKit"
 end
 
-# Used by Keybase.app and extensions
-target "KBKit" do
-  pod "GHKit"
+
+target "Status" do
+  platform :osx, "10.10"
   pod "ObjectiveSugar"
-  pod "GHKeychain"#, :path => "~/Projects/GHKeychain"
-
-  pod "Mantle"
-
-  pod "MPMessagePack"#, :path => "~/Projects/MPMessagePack"
-
-  pod "YOLayout"#, :path => "~/Projects/YOLayout"
-
-  pod "ZXCVBN"
-  pod "AFNetworking"
-
-  pod "CocoaLumberjack"
-  pod "GHODictionary"
-
-  pod "MASPreferences"
-
-  pod "MDPSplitView"
-
-  # Local pods
-  pod "KBAppKit", :path => "."
+  pod "GBCli"
+  pod "Slash"
+  pod "MPMessagePack"
+  pod "KBKit", :path => "KBKit"
 end
 
 # This runs as a privileged helper so keep dependencies
 # here to a minimum.
 target "keybase.Helper" do
-  pod "MPMessagePack"#, :path => "~/Projects/MPMessagePack"
+  platform :osx, "10.10"
+  pod "MPMessagePack"
 end
-

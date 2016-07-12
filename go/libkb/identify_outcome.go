@@ -1,3 +1,6 @@
+// Copyright 2015 Keybase, Inc. All rights reserved. Use of
+// this source code is governed by the included BSD license.
+
 package libkb
 
 import (
@@ -5,27 +8,32 @@ import (
 	"sort"
 	"strings"
 
-	keybase1 "github.com/keybase/client/protocol/go"
+	keybase1 "github.com/keybase/client/go/protocol"
 	jsonw "github.com/keybase/go-jsonw"
+	"github.com/keybase/gregor"
 )
 
 type IdentifyOutcome struct {
-	Username     string
-	Error        error
-	KeyDiffs     []TrackDiff
-	Revoked      []TrackDiffRevoked
-	ProofChecks  []*LinkCheckResult
-	Warnings     []Warning
-	TrackUsed    *TrackLookup
-	TrackEqual   bool // Whether the track statement was equal to what we saw
-	MeSet        bool // whether me was set at the time
-	TrackOptions keybase1.TrackOptions
+	Username              string
+	Error                 error
+	KeyDiffs              []TrackDiff
+	Revoked               []TrackDiff
+	RevokedDetails        []keybase1.RevokedProof
+	ProofChecks           []*LinkCheckResult
+	Warnings              []Warning
+	TrackUsed             *TrackLookup
+	TrackEqual            bool // Whether the track statement was equal to what we saw
+	TrackOptions          keybase1.TrackOptions
+	Reason                keybase1.IdentifyReason
+	ResponsibleGregorItem gregor.Item
 }
 
-func NewIdentifyOutcome(m bool) *IdentifyOutcome {
-	return &IdentifyOutcome{
-		MeSet: m,
-	}
+func NewIdentifyOutcome() *IdentifyOutcome {
+	return &IdentifyOutcome{}
+}
+
+func NewIdentifyOutcomeWithUsername(u string) *IdentifyOutcome {
+	return &IdentifyOutcome{Username: u}
 }
 
 func (i *IdentifyOutcome) remoteProofLinks() *RemoteProofLinks {
@@ -40,8 +48,8 @@ func (i *IdentifyOutcome) ActiveProofs() []RemoteProofChainLink {
 	return i.remoteProofLinks().Active()
 }
 
-func (i *IdentifyOutcome) AddProofsToSet(existing *ProofSet) {
-	i.remoteProofLinks().AddProofsToSet(existing)
+func (i *IdentifyOutcome) AddProofsToSet(existing *ProofSet, okStates []keybase1.ProofState) {
+	i.remoteProofLinks().AddProofsToSet(existing, okStates)
 }
 
 func (i *IdentifyOutcome) TrackSet() *TrackSet {
@@ -138,8 +146,11 @@ func (i IdentifyOutcome) NumTrackChanges() int {
 }
 
 func (i IdentifyOutcome) TrackStatus() keybase1.TrackStatus {
-	if i.NumTrackFailures() > 0 || i.NumRevoked() > 0 {
-		return keybase1.TrackStatus_UPDATE_BROKEN
+	if i.NumRevoked() > 0 {
+		return keybase1.TrackStatus_UPDATE_BROKEN_REVOKED
+	}
+	if i.NumTrackFailures() > 0 {
+		return keybase1.TrackStatus_UPDATE_BROKEN_FAILED_PROOFS
 	}
 	if i.TrackUsed != nil {
 		if i.NumTrackChanges() > 0 {
@@ -156,6 +167,21 @@ func (i IdentifyOutcome) TrackStatus() keybase1.TrackStatus {
 		return keybase1.TrackStatus_NEW_FAIL_PROOFS
 	}
 	return keybase1.TrackStatus_NEW_OK
+}
+
+func (i IdentifyOutcome) IsOK() bool {
+	switch i.TrackStatus() {
+	case keybase1.TrackStatus_UPDATE_NEW_PROOFS:
+		return true
+	case keybase1.TrackStatus_UPDATE_OK:
+		return true
+	case keybase1.TrackStatus_NEW_ZERO_PROOFS:
+		return true
+	case keybase1.TrackStatus_NEW_OK:
+		return true
+	default:
+		return false
+	}
 }
 
 func (i IdentifyOutcome) TrackingStatement() *jsonw.Wrapper {
@@ -207,7 +233,7 @@ func (i IdentifyOutcome) GetError() error {
 }
 
 func (i IdentifyOutcome) GetErrorLax() (Warnings, error) {
-	return i.GetErrorAndWarnings(true)
+	return i.GetErrorAndWarnings(false)
 }
 
 type byDisplayString []*LinkCheckResult

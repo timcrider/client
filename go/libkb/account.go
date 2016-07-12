@@ -1,12 +1,44 @@
+// Copyright 2015 Keybase, Inc. All rights reserved. Use of
+// this source code is governed by the included BSD license.
+
 package libkb
 
 import (
 	"errors"
 	"fmt"
+	"time"
 
-	keybase1 "github.com/keybase/client/protocol/go"
-	triplesec "github.com/keybase/go-triplesec"
+	keybase1 "github.com/keybase/client/go/protocol"
 )
+
+type timedGenericKey struct {
+	Contextified
+	key   GenericKey
+	which string
+	atime time.Time
+}
+
+func newTimedGenericKey(g *GlobalContext, k GenericKey, w string) *timedGenericKey {
+	return &timedGenericKey{
+		Contextified: NewContextified(g),
+		key:          k,
+		atime:        g.Clock().Now(),
+		which:        w,
+	}
+}
+
+func (t *timedGenericKey) getKey() GenericKey {
+	t.atime = t.G().Clock().Now()
+	return t.key
+}
+
+func (t *timedGenericKey) clean() {
+	now := t.G().Clock().Now()
+	if t.key != nil && (now.Sub(t.atime) > PaperKeyMemoryTimeout) {
+		t.G().Log.Debug("Cleaned out key %q at %s", t.which, now)
+		t.key = nil
+	}
+}
 
 type Account struct {
 	Contextified
@@ -15,6 +47,16 @@ type Account struct {
 	loginSession *LoginSession
 	streamCache  *PassphraseStreamCache
 	skbKeyring   *SKBKeyringFile
+	secSigKey    GenericKey // cached secret signing key
+	secEncKey    GenericKey // cached secret encryption key
+	lksec        *LKSec     // local key security (this member not currently used)
+
+	paperSigKey *timedGenericKey // cached, unlocked paper signing key
+	paperEncKey *timedGenericKey // cached, unlocked paper encryption key
+
+	secretPromptCanceledAt time.Time // when the secret prompt was last canceled
+
+	testPostCleanHook func() // for testing, call this hook after cleaning
 }
 
 func NewAccount(g *GlobalContext) *Account {
@@ -27,6 +69,13 @@ func NewAccount(g *GlobalContext) *Account {
 
 func (a *Account) LocalSession() *Session {
 	return a.localSession
+}
+
+func (a *Account) GetUID() (ret keybase1.UID) {
+	if a.localSession != nil {
+		ret = a.localSession.GetUID()
+	}
+	return ret
 }
 
 func (a *Account) UnloadLocalSession() {
@@ -53,7 +102,7 @@ func (a *Account) LoggedInProvisionedLoad() (bool, error) {
 }
 
 func (a *Account) LoadLoginSession(emailOrUsername string) error {
-	if a.LoginSession().ExistsFor(emailOrUsername) {
+	if a.LoginSession().ExistsFor(emailOrUsername) && a.LoginSession().NotExpired() {
 		return nil
 	}
 
@@ -102,27 +151,34 @@ func (a *Account) Logout() error {
 
 	a.UnloadLocalSession()
 	a.loginSession = nil
-	a.skbKeyring = nil
+	a.ClearKeyring()
 
 	a.secretSyncer.Clear()
 	a.secretSyncer = NewSecretSyncer(a.G())
 
+	a.ClearCachedSecretKeys()
+
+	a.lksec = nil
+
 	return nil
 }
 
-func (a *Account) CreateStreamCache(tsec *triplesec.Cipher, pps *PassphraseStream) {
+func (a *Account) CreateStreamCache(tsec Triplesec, pps *PassphraseStream) {
 	if a.streamCache != nil {
-		a.G().Log.Warning("Account.CreateStreamCache overwriting exisitng StreamCache")
+		a.G().Log.Warning("Account.CreateStreamCache overwriting existing StreamCache")
 	}
 	a.streamCache = NewPassphraseStreamCache(tsec, pps)
+	a.SetLKSec(NewLKSec(pps, a.GetUID(), a.G()))
 }
 
 // SetStreamGeneration sets the passphrase generation on the cached stream
 // if it exists, and otherwise will wind up warning of a problem.
-func (a *Account) SetStreamGeneration(gen PassphraseGeneration) {
+func (a *Account) SetStreamGeneration(gen PassphraseGeneration, nilPPStreamOK bool) {
 	ps := a.PassphraseStreamRef()
 	if ps == nil {
-		a.G().Log.Warning("Passphrase stream was nil; unexpected")
+		if !nilPPStreamOK {
+			a.G().Log.Warning("Passphrase stream was nil; unexpected")
+		}
 	} else {
 		ps.SetGeneration(gen)
 	}
@@ -147,12 +203,14 @@ func (a *Account) CreateStreamCacheViaStretch(passphrase string) error {
 		return err
 	}
 
-	tsec, pps, err := StretchPassphrase(passphrase, salt)
+	tsec, pps, err := StretchPassphrase(a.G(), passphrase, salt)
 	if err != nil {
 		return err
 	}
 
 	a.streamCache = NewPassphraseStreamCache(tsec, pps)
+
+	a.SetLKSec(NewLKSec(pps, a.GetUID(), a.G()))
 
 	return nil
 }
@@ -176,15 +234,34 @@ func (a *Account) PassphraseStreamRef() *PassphraseStream {
 func (a *Account) ClearStreamCache() {
 	a.streamCache.Clear()
 	a.streamCache = nil
+	a.lksec = nil
 }
 
 // ClearLoginSession clears out any cached login sessions with the account
 // object
 func (a *Account) ClearLoginSession() {
 	if a.loginSession != nil {
+		// calling this is pointless since setting to nil next:
 		a.loginSession.Clear()
 		a.loginSession = nil
 	}
+}
+
+func (a *Account) SetLKSec(lks *LKSec) {
+	a.lksec = lks
+}
+
+func (a *Account) LKSec() *LKSec {
+	return a.lksec
+}
+
+// LKSecUnlock isn't used, but it could be.  It's here for a future
+// refactoring of the key unlock mess.
+func (a *Account) LKSecUnlock(locked []byte) ([]byte, PassphraseGeneration, error) {
+	if a.lksec == nil {
+		return nil, 0, errors.New("LKSecUnlock: no lksec in account")
+	}
+	return a.lksec.Decrypt(a, locked)
 }
 
 func (a *Account) SecretSyncer() *SecretSyncer {
@@ -294,7 +371,7 @@ func (a *Account) LockedLocalSecretKey(ska SecretKeyArg) (*SKB, error) {
 }
 
 func (a *Account) Shutdown() error {
-	return a.LocalSession().Write()
+	return nil
 }
 
 func (a *Account) EnsureUsername(username NormalizedUsername) {
@@ -310,7 +387,8 @@ func (a *Account) EnsureUsername(username NormalizedUsername) {
 
 }
 
-func (a *Account) UserInfo() (uid keybase1.UID, username NormalizedUsername, token string, deviceSubkey GenericKey, err error) {
+func (a *Account) UserInfo() (uid keybase1.UID, username NormalizedUsername,
+	token string, deviceSubkey, deviceSibkey GenericKey, err error) {
 	if !a.LoggedIn() {
 		err = LoginRequiredError{}
 		return
@@ -325,6 +403,10 @@ func (a *Account) UserInfo() (uid keybase1.UID, username NormalizedUsername, tok
 	if err != nil {
 		return
 	}
+	deviceSibkey, err = user.GetDeviceSibkey()
+	if err != nil {
+		return
+	}
 
 	uid = user.GetUID()
 	username = user.GetNormalizedName()
@@ -332,12 +414,25 @@ func (a *Account) UserInfo() (uid keybase1.UID, username NormalizedUsername, tok
 	return
 }
 
-func (a *Account) SaveState(sessionID, csrf string, username NormalizedUsername, uid keybase1.UID) error {
+// SaveState saves the logins state to memory, and to the user
+// config file.
+func (a *Account) SaveState(sessionID, csrf string, username NormalizedUsername, uid keybase1.UID, deviceID keybase1.DeviceID) error {
+	if err := a.saveUserConfig(username, uid, deviceID); err != nil {
+		return err
+	}
+	return a.LocalSession().SetLoggedIn(sessionID, csrf, username, uid, deviceID)
+}
+
+func (a *Account) saveUserConfig(username NormalizedUsername, uid keybase1.UID, deviceID keybase1.DeviceID) error {
 	cw := a.G().Env.GetConfigWriter()
 	if cw == nil {
 		return NoConfigWriterError{}
 	}
 
+	// XXX I don't understand the intent of clearing the login session here.
+	// All tests pass with this removed, but I'm wary of making any changes.
+	// The git history didn't help, and this is the only place this function
+	// is used (where it matters).
 	if err := a.LoginSession().Clear(); err != nil {
 		return err
 	}
@@ -345,23 +440,112 @@ func (a *Account) SaveState(sessionID, csrf string, username NormalizedUsername,
 	if err != nil {
 		return err
 	}
-	var nilDeviceID keybase1.DeviceID
-	if err := cw.SetUserConfig(NewUserConfig(uid, username, salt, nilDeviceID), false); err != nil {
-		return err
-	}
-	if err := cw.Write(); err != nil {
-		return err
-	}
-	a.LocalSession().SetLoggedIn(sessionID, csrf, username, uid)
-	if err := a.LocalSession().Write(); err != nil {
-		return err
-	}
 
-	return nil
+	// Note that `true` here means that an existing user config entry will
+	// be overwritten.
+	return cw.SetUserConfig(NewUserConfig(uid, username, salt, deviceID), true /* overwrite */)
 }
 
 func (a *Account) Dump() {
 	fmt.Printf("Account dump:\n")
 	a.loginSession.Dump()
 	a.streamCache.Dump()
+}
+
+func (a *Account) CachedSecretKey(ska SecretKeyArg) (GenericKey, error) {
+	if ska.KeyType == DeviceSigningKeyType {
+		if a.secSigKey != nil {
+			return a.secSigKey, nil
+		}
+		return nil, NotFoundError{}
+	}
+	if ska.KeyType == DeviceEncryptionKeyType {
+		if a.secEncKey != nil {
+			return a.secEncKey, nil
+		}
+		return nil, NotFoundError{}
+	}
+	return nil, fmt.Errorf("invalid key type for cached secret key: %d", ska.KeyType)
+}
+
+func (a *Account) SetCachedSecretKey(ska SecretKeyArg, key GenericKey) error {
+	if key == nil {
+		return errors.New("cache of nil secret key attempted")
+	}
+	if ska.KeyType == DeviceSigningKeyType {
+		a.G().Log.Debug("caching secret key for %d", ska.KeyType)
+		a.secSigKey = key
+		return nil
+	}
+	if ska.KeyType == DeviceEncryptionKeyType {
+		a.G().Log.Debug("caching secret key for %d", ska.KeyType)
+		a.secEncKey = key
+		return nil
+	}
+	return fmt.Errorf("attempt to cache invalid key type: %d", ska.KeyType)
+}
+
+func (a *Account) SetUnlockedPaperKey(sig GenericKey, enc GenericKey) error {
+	a.paperSigKey = newTimedGenericKey(a.G(), sig, "paper signing key")
+	a.paperEncKey = newTimedGenericKey(a.G(), enc, "paper encryption key")
+	return nil
+}
+
+func (a *Account) GetUnlockedPaperSigKey() GenericKey {
+	if a.paperSigKey == nil {
+		return nil
+	}
+	return a.paperSigKey.getKey()
+}
+
+func (a *Account) GetUnlockedPaperEncKey() GenericKey {
+	if a.paperEncKey == nil {
+		return nil
+	}
+	return a.paperEncKey.getKey()
+}
+
+func (a *Account) ClearCachedSecretKeys() {
+	a.G().Log.Debug("clearing cached secret keys")
+	a.secSigKey = nil
+	a.secEncKey = nil
+	a.paperEncKey = nil
+	a.paperSigKey = nil
+}
+
+func (a *Account) SetTestPostCleanHook(f func()) {
+	a.testPostCleanHook = f
+}
+
+func (a *Account) clean() {
+	if a.paperEncKey != nil {
+		a.paperEncKey.clean()
+	}
+	if a.paperSigKey != nil {
+		a.paperSigKey.clean()
+	}
+	if a.testPostCleanHook != nil {
+		a.testPostCleanHook()
+	}
+}
+
+func (a *Account) ClearKeyring() {
+	a.skbKeyring = nil
+}
+
+func (a *Account) SkipSecretPrompt() bool {
+	if a.secretPromptCanceledAt.IsZero() {
+		return false
+	}
+
+	if a.G().Clock().Now().Sub(a.secretPromptCanceledAt) < SecretPromptCancelDuration {
+		return true
+	}
+
+	a.secretPromptCanceledAt = time.Time{}
+	return false
+}
+
+func (a *Account) SecretPromptCanceled() {
+	a.secretPromptCanceledAt = a.G().Clock().Now()
 }

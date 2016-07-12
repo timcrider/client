@@ -1,48 +1,88 @@
+// Copyright 2015 Keybase, Inc. All rights reserved. Use of
+// this source code is governed by the included BSD license.
+
 package client
 
 import (
+	"io"
+	"sync"
+
 	"github.com/keybase/client/go/libkb"
 	"github.com/keybase/client/go/minterm"
-	keybase1 "github.com/keybase/client/protocol/go"
-	"io"
+	keybase1 "github.com/keybase/client/go/protocol"
 )
 
 type Terminal struct {
+	libkb.Contextified
+	once   sync.Once // protects opening the minterm
 	engine *minterm.MinTerm
 }
 
-func NewTerminal() (*Terminal, error) {
-	eng, err := minterm.New()
-	if err != nil {
-		return nil, err
-	}
-	return &Terminal{engine: eng}, nil
+func NewTerminal(g *libkb.GlobalContext) (*Terminal, error) {
+	return &Terminal{Contextified: libkb.NewContextified(g)}, nil
 }
 
-func (t Terminal) Shutdown() error {
+func (t *Terminal) open() error {
+	var err error
+	t.once.Do(func() {
+		if t.engine != nil {
+			return
+		}
+		var eng *minterm.MinTerm
+		eng, err = minterm.New()
+		if err != nil {
+			return
+		}
+		t.engine = eng
+		return
+	})
+	return err
+}
+
+func (t *Terminal) Shutdown() error {
+	if t.engine == nil {
+		return nil
+	}
 	return t.engine.Shutdown()
 }
 
-func (t Terminal) PromptPassword(s string) (string, error) {
+func (t *Terminal) PromptPassword(s string) (string, error) {
+	if err := t.open(); err != nil {
+		return "", err
+	}
 	return t.engine.PromptPassword(s)
 }
 
-func (t Terminal) Write(s string) error {
+func (t *Terminal) Write(s string) error {
+	if err := t.open(); err != nil {
+		return err
+	}
 	return t.engine.Write(s)
 }
 
-func (t Terminal) Prompt(s string) (string, error) {
-	return t.engine.Prompt(s)
+func (t *Terminal) Prompt(s string) (string, error) {
+	if err := t.open(); err != nil {
+		return "", err
+	}
+	s, err := t.engine.Prompt(s)
+	if err == minterm.ErrPromptInterrupted {
+		err = libkb.CanceledError{M: "input canceled"}
+	}
+	return s, err
 }
 
-func (t Terminal) PromptYesNo(p string, def PromptDefault) (ret bool, err error) {
+func (t *Terminal) PromptYesNo(p string, def libkb.PromptDefault) (ret bool, err error) {
+	if err := t.open(); err != nil {
+		return false, err
+	}
+
 	var ch string
 	switch def {
-	case PromptDefaultNeither:
+	case libkb.PromptDefaultNeither:
 		ch = "[y/n]"
-	case PromptDefaultYes:
+	case libkb.PromptDefaultYes:
 		ch = "[Y/n]"
-	case PromptDefaultNo:
+	case libkb.PromptDefaultNo:
 		ch = "[y/N]"
 	}
 	prompt := p + " " + ch + " "
@@ -57,10 +97,10 @@ func (t Terminal) PromptYesNo(p string, def PromptDefault) (ret bool, err error)
 			ret = false
 			done = true
 		} else if libkb.IsEmpty(s) {
-			if def == PromptDefaultNo {
+			if def == libkb.PromptDefaultNo {
 				ret = false
 				done = true
-			} else if def == PromptDefaultYes {
+			} else if def == libkb.PromptDefaultYes {
 				ret = true
 				done = true
 			}
@@ -69,18 +109,27 @@ func (t Terminal) PromptYesNo(p string, def PromptDefault) (ret bool, err error)
 	return
 }
 
-func (t Terminal) GetSize() (int, int) {
+// GetSize tries to get the size for the current terminal.
+// It if fails it returns 80x24
+func (t *Terminal) GetSize() (int, int) {
+	if err := t.open(); err != nil {
+		return 80, 24
+	}
 	return t.engine.Size()
 }
 
-func (t Terminal) GetSecret(arg *keybase1.SecretEntryArg) (res *keybase1.SecretEntryRes, err error) {
+func (t *Terminal) GetSecret(arg *keybase1.SecretEntryArg) (res *keybase1.SecretEntryRes, err error) {
+
+	if err := t.open(); err != nil {
+		return nil, err
+	}
 
 	desc := arg.Desc
 	prompt := arg.Prompt
 	canceled := false
 
 	if len(arg.Err) > 0 {
-		G.Log.Error(arg.Err)
+		t.G().Log.Error(arg.Err)
 	}
 
 	if len(desc) > 0 {
@@ -90,7 +139,11 @@ func (t Terminal) GetSecret(arg *keybase1.SecretEntryArg) (res *keybase1.SecretE
 	}
 
 	var txt string
-	txt, err = t.PromptPassword(prompt)
+	if arg.ShowTyping {
+		txt, err = t.Prompt(prompt)
+	} else {
+		txt, err = t.PromptPassword(prompt)
+	}
 
 	if err == io.EOF || err == minterm.ErrPromptInterrupted || len(txt) == 0 {
 		err = nil
@@ -103,7 +156,7 @@ func (t Terminal) GetSecret(arg *keybase1.SecretEntryArg) (res *keybase1.SecretE
 	if arg.UseSecretStore && !canceled && err == nil {
 		// TODO: Default to 'No' and dismiss the question for
 		// about a day if 'No' is selected.
-		res.StoreSecret, err = t.PromptYesNo(libkb.GetTerminalPrompt(), PromptDefaultYes)
+		res.StoreSecret, err = t.PromptYesNo(t.G().SecretStoreAll.GetTerminalPrompt(), libkb.PromptDefaultYes)
 		if err != nil {
 			return
 		}

@@ -1,3 +1,6 @@
+// Copyright 2015 Keybase, Inc. All rights reserved. Use of
+// this source code is governed by the included BSD license.
+
 package client
 
 import (
@@ -6,49 +9,46 @@ import (
 	"strings"
 	"text/tabwriter"
 
+	"golang.org/x/net/context"
+
 	"github.com/keybase/cli"
 	"github.com/keybase/client/go/libcmdline"
 	"github.com/keybase/client/go/libkb"
-	keybase1 "github.com/keybase/client/protocol/go"
-	"github.com/maxtaco/go-framed-msgpack-rpc/rpc2"
+	keybase1 "github.com/keybase/client/go/protocol"
 )
 
 // CmdListTrackers is the 'list-trackers' command.  It displays
 // all the trackers for a user.
 type CmdListTrackers struct {
-	uid      keybase1.UID
-	username string
-	verbose  bool
-	json     bool
-	headers  bool
+	libkb.Contextified
+	assertion string
+	verbose   bool
+	json      bool
+	headers   bool
 }
 
 // NewCmdListTrackers creates a new cli.Command.
-func NewCmdListTrackers(cl *libcmdline.CommandLine) cli.Command {
+func NewCmdListTrackers(cl *libcmdline.CommandLine, g *libkb.GlobalContext) cli.Command {
 	return cli.Command{
 		Name:         "list-trackers",
 		ArgumentHelp: "<username>",
 		Usage:        "List trackers",
 		Flags: []cli.Flag{
 			cli.BoolFlag{
-				Name:  "i, uid",
-				Usage: "Load user by UID.",
-			},
-			cli.BoolFlag{
-				Name:  "v, verbose",
-				Usage: "A full dump, with more gory details.",
+				Name:  "H, headers",
+				Usage: "Show column headers.",
 			},
 			cli.BoolFlag{
 				Name:  "j, json",
 				Usage: "Output as JSON (default is text).",
 			},
 			cli.BoolFlag{
-				Name:  "H, headers",
-				Usage: "Show column headers.",
+				Name:  "v, verbose",
+				Usage: "A full dump, with more gory details.",
 			},
 		},
 		Action: func(c *cli.Context) {
-			cl.ChooseCommand(&CmdListTrackers{}, "list-trackers", c)
+			cl.ChooseCommand(&CmdListTrackers{Contextified: libkb.NewContextified(g)}, "list-trackers", c)
 		},
 	}
 }
@@ -78,31 +78,26 @@ func populateList(trs []keybase1.Tracker, summarizer batchfn) (ret []keybase1.Us
 
 // RunClient runs the command in client/server mode.
 func (c *CmdListTrackers) Run() error {
-	cli, err := GetUserClient()
+	cli, err := GetUserClient(c.G())
 	if err != nil {
 		return err
 	}
-	protocols := []rpc2.Protocol{
-		NewLogUIProtocol(),
-	}
-	if err := RegisterProtocols(protocols); err != nil {
+	if err := RegisterProtocols(nil); err != nil {
 		return err
 	}
 
 	var trs []keybase1.Tracker
-	if c.uid.Exists() {
-		trs, err = cli.ListTrackers(keybase1.ListTrackersArg{Uid: c.uid})
-	} else if len(c.username) > 0 {
-		trs, err = cli.ListTrackersByName(keybase1.ListTrackersByNameArg{Username: c.username})
+	if len(c.assertion) > 0 {
+		trs, err = cli.ListTrackersByName(context.TODO(), keybase1.ListTrackersByNameArg{Username: c.assertion})
 	} else {
-		trs, err = cli.ListTrackersSelf(0)
+		trs, err = cli.ListTrackersSelf(context.TODO(), 0)
 	}
 	if err != nil {
 		return err
 	}
 
 	summarize := func(uids []keybase1.UID) (res []keybase1.UserSummary, err error) {
-		return cli.LoadUncheckedUserSummaries(keybase1.LoadUncheckedUserSummariesArg{Uids: uids})
+		return cli.LoadUncheckedUserSummaries(context.TODO(), keybase1.LoadUncheckedUserSummariesArg{Uids: uids})
 	}
 
 	return c.output(trs, summarize)
@@ -209,17 +204,8 @@ func (c *CmdListTrackers) proofSummary(p keybase1.Proofs) string {
 
 // ParseArgv parses the command args.
 func (c *CmdListTrackers) ParseArgv(ctx *cli.Context) error {
-	byUID := ctx.Bool("uid")
 	if len(ctx.Args()) == 1 {
-		if byUID {
-			var err error
-			c.uid, err = libkb.UIDFromHex(ctx.Args()[0])
-			if err != nil {
-				return err
-			}
-		} else {
-			c.username = ctx.Args()[0]
-		}
+		c.assertion = ctx.Args()[0]
 	}
 
 	c.verbose = ctx.Bool("verbose")

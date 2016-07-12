@@ -1,0 +1,217 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Wix xmlns="http://schemas.microsoft.com/wix/2006/wi"
+     xmlns:bal="http://schemas.microsoft.com/wix/BalExtension"
+     xmlns:util="http://schemas.microsoft.com/wix/UtilExtension">
+  <Bundle Name="Keybase" Version="$(env.KEYBASE_WINVER)" Manufacturer="Keybase, Inc." UpgradeCode="418432ab-0366-40fd-a396-8cc0c4200252">
+    <Variable Name="DokanProduct64" Type="string" Value="{65A3A964-3DC3-0100-0000-160621082245}" />
+    <Variable Name="DokanProduct86" Type="string" Value="{65A3A986-3DC3-0100-0000-160621082245}" />
+    <Log PathVariable="LOGPATH_PROP"/>
+    <util:FileSearchRef Id='WINTRUST_FileSearch' />
+    <util:RegistrySearchRef Id='InnoCLIUninstall' />
+    <util:RegistrySearchRef Id='InnoCLIUninstall64' />
+    <BootstrapperApplicationRef Id="WixStandardBootstrapperApplication.HyperlinkLicense">
+      <bal:WixStandardBootstrapperApplication
+            LicenseUrl="https://keybase.io/docs/terms"
+            ThemeFile="HyperlinkTheme.xml"
+            LocalizationFile="HyperlinkTheme.wxl"
+            LogoFile="logo-64.bmp"
+            LicenseFile="license.rtf"
+            ShowVersion="yes"
+            SuppressOptionsUI="yes"
+            />
+    </BootstrapperApplicationRef>
+    <!-- These two are for the most recent KBFS -->
+    <util:RegistrySearch Id="InnoUninstall"
+                 Variable="InnoUninstallString"        
+                 Root="HKLM"
+                 Key="SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\{357F272E-BE0E-409F-8E39-0BB9827F5716}_is1"
+                 Value="QuietUninstallString"
+                 Format="raw"        
+                 />
+    <util:RegistrySearch Id="InnoUninstall64"
+                 After="InnoUninstall"
+                 Condition="NOT InnoUninstallString"
+                 Variable="InnoUninstallString"
+                 Root="HKLM"
+                 Key="SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\{357F272E-BE0E-409F-8E39-0BB9827F5716}_is1"
+                 Value="QuietUninstallString"
+                 Format="raw"
+                 Win64="yes"
+                 />
+    <!-- From the old Inno installer for Dokan 0.8.0 -->
+    <util:RegistrySearch Id="InnoUninstall2"
+             Variable="InnoUninstallString"
+             After="InnoUninstall64"
+             Condition="NOT InnoUninstallString"
+             Root="HKLM"
+             Key="SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\{DEB2E54C-C39F-4DC8-93A7-ABE0AB91DDCA}_is1"
+             Value="QuietUninstallString"
+             Format="raw"
+                 />
+    <util:RegistrySearch Id="InnoUninstall264"
+                 After="InnoUninstall2"
+                 Condition="NOT InnoUninstallString"
+                 Variable="InnoUninstallString"
+                 Root="HKLM"
+                 Key="SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\{DEB2E54C-C39F-4DC8-93A7-ABE0AB91DDCA}_is1"
+                 Value="QuietUninstallString"
+                 Format="raw"
+                 Win64="yes"
+                 />
+    <!-- From the old Inno installer for Dokan 1.0.0RC2 -->
+    <util:RegistrySearch Id="InnoUninstall3"
+             Variable="InnoUninstallString"
+             After="InnoUninstall264"
+             Condition="NOT InnoUninstallString"
+             Root="HKLM"
+             Key="SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\{1B2672D9-2BAD-4C11-BA53-A75AF6FD7789}_is1"
+             Value="QuietUninstallString"
+             Format="raw"
+                 />
+    <util:RegistrySearch Id="InnoUninstall364"
+                 After="InnoUninstall3"
+                 Condition="NOT InnoUninstallString"
+                 Variable="InnoUninstallString"
+                 Root="HKLM"
+                 Key="SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\{1B2672D9-2BAD-4C11-BA53-A75AF6FD7789}_is1"
+                 Value="QuietUninstallString"
+                 Format="raw"
+                 Win64="yes"
+                 />
+
+    <!-- Dokany Product Codes: v1.0.0-RC4.2 -->
+    
+    <util:RegistrySearch Id="DokanUninstallx86"
+                 Variable="DokanUninstallString"
+                 Root="HKLM"
+                 Key="SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\[DokanProduct86]"
+                 Value="UninstallString"
+                 Format="raw"
+                 />
+    <util:RegistrySearch Id="DokanUninstallx86_64"
+                 After="DokanUninstallx86"        
+                 Condition="NOT DokanUninstallString"        
+                 Variable="DokanUninstallString"
+                 Root="HKLM"
+                 Key="SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\[DokanProduct86]"
+                 Value="UninstallString"
+                 Format="raw"
+                 Win64="yes"
+                 />
+    
+    <util:RegistrySearch Id="DokanUninstall64"
+                 After="DokanUninstallx86_64"        
+                 Condition="NOT DokanUninstallString"        
+                 Variable="DokanUninstallString"
+                 Root="HKLM"
+                 Key="SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\[DokanProduct64]"
+                 Value="UninstallString"
+                 Format="raw"
+                 />
+    <util:RegistrySearch Id="DokanUninstall64_64"
+                 After="DokanUninstallx86_64"
+                 Condition="NOT DokanUninstallString"
+                 Variable="DokanUninstallString"
+                 Root="HKLM"
+                 Key="SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\[DokanProduct64]"
+                 Value="UninstallString"
+                 Format="raw"
+                 Win64="yes"
+                 />
+    
+    <util:RegistrySearch Id="TargetDokanUninstallKey"
+                 Variable="TargetDokanUninstallKey"
+                 Root="HKCU"
+                 Key="SOFTWARE\Keybase"
+                 Value="TargetDokanUninstallKey"
+                 Format="raw"
+                 />
+    <util:RegistrySearch Id="TargetDokanUninstallKey_64"
+                 Variable="TargetDokanUninstallKey"
+                 After="TargetDokanUninstallKey"
+                 Condition="NOT TargetDokanUninstallKey"
+                 Root="HKCU"
+                 Key="SOFTWARE\Keybase"
+                 Value="TargetDokanUninstallKey"
+                 Format="raw"
+                 Win64="yes"
+                 />
+
+
+    <Chain>
+      <!-- Run whatever quiet uninstaller we detected. -->
+      <ExePackage
+        SourceFile="$(env.GOPATH)\src\github.com\keybase\client\go\tools\runquiet\runquiet.exe"
+          InstallCommand="-wait [InnoUninstallString] /NORESTART"
+          DetectCondition="NOT InnoUninstallString"
+          PerMachine="yes"
+          Permanent="yes">
+        <ExitCode Behavior="forceReboot"/>
+      </ExePackage>
+
+      <!-- DetectCondition is critical here, since on update this package will be invoked with /uninstall,
+           (WixBundleAction=3). We want to let it uninstall (condition true) if we know the target is different,
+           which the updater writes to the registry and we retrieve via TargetDokanUninstallKey. 
+           Otherwise, we block uninstall, so things will be nice and quiet. 
+           
+           Stated another way, we want DetectCondition to be always true after install except
+           if ( uninstalling and TargetDokanUninstallKey <> [DokanUninstallCode])
+        -->
+      <ExePackage
+        SourceFile="$(env.DOKAN_PATH)\dokan_wix\DokanSetup_redist.exe"
+          InstallCommand="/quiet"
+          UninstallCommand="/quiet /uninstall"
+          DetectCondition="DokanUninstallString and NOT (WixBundleAction=3 AND ( TargetDokanUninstallKey &lt;&gt; DokanProduct64 AND TargetDokanUninstallKey &lt;&gt; DokanProduct86 ))"
+          PerMachine="yes"
+          Permanent="yes">
+      </ExePackage>
+      
+      <MsiPackage Id="KeybasePrograms" 
+                  SourceFile="$(var.KeybaseApps.TargetPath)" 
+                  DisplayInternalUI='no'
+                  Permanent="no">
+      </MsiPackage>
+		</Chain>
+	</Bundle>
+  <Fragment>    
+    <util:FileSearch Id="WINTRUST_FileSearch"
+                     Path="[SystemFolder]Wintrust.dll"
+                     Variable="WINTRUSTVERSION"
+                     Result="version"
+                     />
+    <bal:Condition
+      Message="Microsoft patch KB3033929 is not installed. A reboot is needed between the installation of said patch and the installation of Keybase. https://support.microsoft.com/en-us/kb/3033929">
+      <![CDATA[Installed OR VersionNT > v6.1 OR (VersionNT = v6.1 AND WINTRUSTVERSION >= v6.1.7601.18741)]]>
+    </bal:Condition>
+    <!-- If the installer is launched elevated, then the keybase.exe process will initially run under elevated permissions, which 
+        prevents clients run as normal user from connecting to its pipe. It is ok after reboot but confuses people, so lets' just not
+        let them.
+    -->
+    <bal:Condition Message="This installer must not be launched as administrator.">
+      NOT WixBundleElevated
+    </bal:Condition>
+  </Fragment>
+  <Fragment>
+    <util:RegistrySearch
+          Id='InnoCLIUninstall'
+          Variable="InnoCLIInstalled"
+          Result="exists"
+          Root="HKLM"
+          Key="Software\Microsoft\Windows\CurrentVersion\Uninstall\{70E747DE-4E09-44B0-ACAD-784AA9D79C02}_is1"
+          Value="UninstallString" />
+
+    <util:RegistrySearch
+          Id='InnoCLIUninstall64'
+          Variable="InnoCLIInstalled64"
+          Result="exists"
+          Root="HKLM"
+          Key="Software\Microsoft\Windows\CurrentVersion\Uninstall\{70E747DE-4E09-44B0-ACAD-784AA9D79C02}_is1"
+          Value="UninstallString" 
+          Win64="yes"/>
+
+    <bal:Condition
+      Message="Please uninstall any previous Keybase versions before continuing.">
+      <![CDATA[NOT InnoCLIInstalled AND NOT InnoCLIInstalled64]]>
+    </bal:Condition>
+  </Fragment>
+</Wix>

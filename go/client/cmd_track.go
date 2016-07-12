@@ -1,21 +1,28 @@
+// Copyright 2015 Keybase, Inc. All rights reserved. Use of
+// this source code is governed by the included BSD license.
+
 package client
 
 import (
 	"fmt"
 
+	"golang.org/x/net/context"
+
 	"github.com/keybase/cli"
 	"github.com/keybase/client/go/libcmdline"
 	"github.com/keybase/client/go/libkb"
-	keybase1 "github.com/keybase/client/protocol/go"
-	"github.com/maxtaco/go-framed-msgpack-rpc/rpc2"
+	keybase1 "github.com/keybase/client/go/protocol"
+	rpc "github.com/keybase/go-framed-msgpack-rpc"
 )
 
 type CmdTrack struct {
-	user    string
-	options keybase1.TrackOptions
+	user           string
+	skipProofCache bool
+	options        keybase1.TrackOptions
+	libkb.Contextified
 }
 
-func NewCmdTrack(cl *libcmdline.CommandLine) cli.Command {
+func NewCmdTrack(cl *libcmdline.CommandLine, g *libkb.GlobalContext) cli.Command {
 	return cli.Command{
 		Name:         "track",
 		ArgumentHelp: "<username>",
@@ -29,11 +36,27 @@ func NewCmdTrack(cl *libcmdline.CommandLine) cli.Command {
 				Name:  "y",
 				Usage: "Approve remote tracking without prompting.",
 			},
+			cli.BoolFlag{
+				Name:  "s, skip-proof-cache",
+				Usage: "Skip cached proofs, force re-check",
+			},
 		},
 		Action: func(c *cli.Context) {
-			cl.ChooseCommand(&CmdTrack{}, "track", c)
+			cl.ChooseCommand(NewCmdTrackRunner(g), "track", c)
 		},
 	}
+}
+
+func NewCmdTrackRunner(g *libkb.GlobalContext) *CmdTrack {
+	return &CmdTrack{Contextified: libkb.NewContextified(g)}
+}
+
+func (v *CmdTrack) SetUser(user string) {
+	v.user = user
+}
+
+func (v *CmdTrack) SetOptions(options keybase1.TrackOptions) {
+	v.options = options
 }
 
 func (v *CmdTrack) ParseArgv(ctx *cli.Context) error {
@@ -42,27 +65,28 @@ func (v *CmdTrack) ParseArgv(ctx *cli.Context) error {
 	}
 	v.user = ctx.Args()[0]
 	v.options = keybase1.TrackOptions{LocalOnly: ctx.Bool("local"), BypassConfirm: ctx.Bool("y")}
+	v.skipProofCache = ctx.Bool("skip-proof-cache")
 	return nil
 }
 
 func (v *CmdTrack) Run() error {
-	cli, err := GetTrackClient()
+	cli, err := GetTrackClient(v.G())
 	if err != nil {
 		return err
 	}
 
-	protocols := []rpc2.Protocol{
-		NewLogUIProtocol(),
-		NewIdentifyTrackUIProtocol(),
-		NewSecretUIProtocol(),
+	protocols := []rpc.Protocol{
+		NewIdentifyTrackUIProtocol(v.G()),
+		NewSecretUIProtocol(v.G()),
 	}
-	if err = RegisterProtocols(protocols); err != nil {
+	if err = RegisterProtocolsWithContext(protocols, v.G()); err != nil {
 		return err
 	}
 
-	return cli.Track(keybase1.TrackArg{
-		UserAssertion: v.user,
-		Options:       v.options,
+	return cli.Track(context.TODO(), keybase1.TrackArg{
+		UserAssertion:    v.user,
+		Options:          v.options,
+		ForceRemoteCheck: v.skipProofCache,
 	})
 }
 

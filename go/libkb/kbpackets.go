@@ -1,3 +1,6 @@
+// Copyright 2015 Keybase, Inc. All rights reserved. Use of
+// this source code is governed by the included BSD license.
+
 package libkb
 
 //
@@ -12,11 +15,19 @@ import (
 	"fmt"
 	"io"
 
-	jsonw "github.com/keybase/go-jsonw"
-	"github.com/ugorji/go/codec"
+	"github.com/keybase/go-codec/codec"
 )
 
-func CodecHandle() *codec.MsgpackHandle {
+type FishyMsgpackError struct {
+	original  []byte
+	reencoded []byte
+}
+
+func (e FishyMsgpackError) Error() string {
+	return fmt.Sprintf("Original msgpack data didn't match re-encoded version: %#v != %#v", e.reencoded, e.original)
+}
+
+func codecHandle() *codec.MsgpackHandle {
 	var mh codec.MsgpackHandle
 	mh.WriteExt = true
 	return &mh
@@ -38,35 +49,44 @@ type KeybasePacket struct {
 
 type KeybasePackets []*KeybasePacket
 
-func (p *KeybasePacket) HashToBytes() (ret []byte, err error) {
-	zb := [0]byte{}
-	if p.Hash == nil {
-		p.Hash = &KeybasePacketHash{}
+func NewKeybasePacket(body interface{}, tag int, version int) (*KeybasePacket, error) {
+	ret := KeybasePacket{
+		Body:    body,
+		Tag:     tag,
+		Version: version,
 	}
-	tmp := p.Hash.Value
-	defer func() {
-		p.Hash.Value = tmp
-	}()
-	p.Hash.Value = zb[:]
-	p.Hash.Type = SHA256Code
 
+	hashBytes, hashErr := ret.hashToBytes()
+	if hashErr != nil {
+		return nil, hashErr
+	}
+	ret.Hash = &KeybasePacketHash{
+		Type:  SHA256Code,
+		Value: hashBytes,
+	}
+	return &ret, nil
+}
+
+func (p *KeybasePacket) hashToBytes() ([]byte, error) {
+	// We don't include the Hash field in the encoded bytes that we hash,
+	// because if we did then the result wouldn't be stable. To work around
+	// that, we make a copy of the packet and overwrite the Hash field with
+	// an empty slice.
+	packetCopy := *p
+	packetCopy.Hash = &KeybasePacketHash{
+		Type:  SHA256Code,
+		Value: []byte{},
+	}
 	var encoded []byte
-	if encoded, err = p.Encode(); err != nil {
-		return
-	}
-
-	sum := sha256.Sum256(encoded)
-	ret = sum[:]
-	return
-}
-
-func (p *KeybasePacket) HashMe() error {
 	var err error
-	p.Hash.Value, err = p.HashToBytes()
-	return err
+	if encoded, err = packetCopy.Encode(); err != nil {
+		return nil, err
+	}
+	ret := sha256.Sum256(encoded)
+	return ret[:], nil
 }
 
-func (p *KeybasePacket) CheckHash() error {
+func (p *KeybasePacket) checkHash() error {
 	var gotten []byte
 	var err error
 	if p.Hash == nil {
@@ -75,7 +95,7 @@ func (p *KeybasePacket) CheckHash() error {
 	given := p.Hash.Value
 	if p.Hash.Type != SHA256Code {
 		err = fmt.Errorf("Bad hash code: %d", p.Hash.Type)
-	} else if gotten, err = p.HashToBytes(); err != nil {
+	} else if gotten, err = p.hashToBytes(); err != nil {
 
 	} else if !FastByteArrayEq(gotten, given) {
 		err = fmt.Errorf("Bad packet hash")
@@ -85,7 +105,7 @@ func (p *KeybasePacket) CheckHash() error {
 
 func (p *KeybasePacket) Encode() ([]byte, error) {
 	var encoded []byte
-	err := codec.NewEncoderBytes(&encoded, CodecHandle()).Encode(p)
+	err := codec.NewEncoderBytes(&encoded, codecHandle()).Encode(p)
 	return encoded, err
 }
 
@@ -101,34 +121,31 @@ func (p *KeybasePacket) ArmoredEncode() (ret string, err error) {
 }
 
 func (p *KeybasePacket) EncodeTo(w io.Writer) error {
-	err := codec.NewEncoder(w, CodecHandle()).Encode(p)
+	err := codec.NewEncoder(w, codecHandle()).Encode(p)
 	return err
 }
 
 func (p KeybasePackets) Encode() ([]byte, error) {
 	var encoded []byte
-	err := codec.NewEncoderBytes(&encoded, CodecHandle()).Encode(p)
+	err := codec.NewEncoderBytes(&encoded, codecHandle()).Encode(p)
 	return encoded, err
 }
 
 func (p KeybasePackets) EncodeTo(w io.Writer) error {
-	err := codec.NewEncoder(w, CodecHandle()).Encode(p)
+	err := codec.NewEncoder(w, codecHandle()).Encode(p)
 	return err
 }
 
-func DecodePackets(reader io.Reader) (ret KeybasePackets, err error) {
-	ch := CodecHandle()
-	var generics []interface{}
-	if err = codec.NewDecoder(reader, ch).Decode(&generics); err != nil {
+// DecodePacketsUnchecked decodes an array of packets from `reader`. It does *not*
+// check that the stream was canonical msgpack.
+func DecodePacketsUnchecked(reader io.Reader) (ret KeybasePackets, err error) {
+	ch := codecHandle()
+	if err = codec.NewDecoder(reader, ch).Decode(&ret); err != nil {
 		return
 	}
-	ret = make(KeybasePackets, len(generics))
-	for i, e := range generics {
-		var encoded []byte
-		if err = codec.NewEncoderBytes(&encoded, ch).Encode(e); err != nil {
-			return
-		}
-		if ret[i], err = DecodePacket(encoded); err != nil {
+	for _, p := range ret {
+		err = p.unpackBody(ch)
+		if err != nil {
 			return
 		}
 	}
@@ -149,12 +166,7 @@ func MsgpackDecodeAll(data []byte, handle *codec.MsgpackHandle, out interface{})
 	return nil
 }
 
-func (p *KeybasePacket) MyUnmarshalBinary(data []byte) error {
-	ch := CodecHandle()
-	if err := MsgpackDecodeAll(data, ch, p); err != nil {
-		return err
-	}
-
+func (p *KeybasePacket) unpackBody(ch *codec.MsgpackHandle) error {
 	var body interface{}
 
 	switch p.Tag {
@@ -177,15 +189,39 @@ func (p *KeybasePacket) MyUnmarshalBinary(data []byte) error {
 		return err
 	}
 	p.Body = body
-	return p.CheckHash()
+
+	return nil
 }
 
-func GetPacket(jsonw *jsonw.Wrapper) (*KeybasePacket, error) {
-	s, err := jsonw.GetString()
-	if err != nil {
-		return nil, err
+func (p *KeybasePacket) unmarshalBinary(data []byte) error {
+	ch := codecHandle()
+	if err := MsgpackDecodeAll(data, ch, p); err != nil {
+		return err
 	}
-	return DecodeArmoredPacket(s)
+
+	if err := p.unpackBody(ch); err != nil {
+		return err
+	}
+
+	// Test for nonstandard msgpack data (which could be maliciously crafted)
+	// by re-encoding and making sure we get the same thing.
+	// https://github.com/keybase/client/issues/423
+	//
+	// Ideally this should be done at a lower level, like MsgpackDecodeAll, but
+	// our msgpack library doesn't sort maps the way we expect. See
+	// https://github.com/ugorji/go/issues/103
+	var reencoded []byte
+	if err := codec.NewEncoderBytes(&reencoded, ch).Encode(p); err != nil {
+		return err
+	}
+
+	if reencoded, err := p.Encode(); err != nil {
+		return err
+	} else if !bytes.Equal(reencoded, data) {
+		return FishyMsgpackError{data, reencoded}
+	}
+
+	return p.checkHash()
 }
 
 func DecodeArmoredPacket(s string) (*KeybasePacket, error) {
@@ -198,7 +234,7 @@ func DecodeArmoredPacket(s string) (*KeybasePacket, error) {
 
 func DecodePacket(data []byte) (ret *KeybasePacket, err error) {
 	ret = &KeybasePacket{}
-	err = ret.MyUnmarshalBinary(data)
+	err = ret.unmarshalBinary(data)
 	if err != nil {
 		ret = nil
 	}

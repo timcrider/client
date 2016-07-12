@@ -1,3 +1,6 @@
+// Copyright 2015 Keybase, Inc. All rights reserved. Use of
+// this source code is governed by the included BSD license.
+
 package libkb
 
 import (
@@ -8,8 +11,7 @@ import (
 	"io"
 
 	"github.com/agl/ed25519"
-	keybase1 "github.com/keybase/client/protocol/go"
-	triplesec "github.com/keybase/go-triplesec"
+	keybase1 "github.com/keybase/client/go/protocol"
 	"golang.org/x/crypto/nacl/box"
 )
 
@@ -59,6 +61,8 @@ type NaclSigningKeyPair struct {
 	Private *NaclSigningKeyPrivate
 }
 
+var _ GenericKey = NaclSigningKeyPair{}
+
 type NaclDHKeyPublic [NaclDHKeysize]byte
 type NaclDHKeyPrivate [NaclDHKeysize]byte
 
@@ -66,6 +70,8 @@ type NaclDHKeyPair struct {
 	Public  NaclDHKeyPublic
 	Private *NaclDHKeyPrivate
 }
+
+var _ GenericKey = NaclDHKeyPair{}
 
 func importNaclHex(s string, typ byte, bodyLen int) (ret []byte, err error) {
 	kid := keybase1.KIDFromString(s)
@@ -304,36 +310,54 @@ func (k NaclSigningKeyPair) SignToString(msg []byte) (sig string, id keybase1.Si
 }
 
 func (k NaclSigningKeyPair) VerifyStringAndExtract(sig string) (msg []byte, id keybase1.SigID, err error) {
-	body, err := base64.StdEncoding.DecodeString(sig)
+	var keyInSignature GenericKey
+	var fullSigBody []byte
+	keyInSignature, msg, fullSigBody, err = NaclVerifyAndExtract(sig)
 	if err != nil {
 		return
 	}
 
-	packet, err := DecodePacket(body)
-	if err != nil {
+	kidInSig := keyInSignature.GetKID()
+	kidWanted := k.GetKID()
+	if kidWanted.NotEqual(kidInSig) {
+		err = WrongKidError{kidInSig, kidWanted}
 		return
+	}
+
+	id = ComputeSigIDFromSigBody(fullSigBody)
+	return
+}
+
+// NaclVerifyAndExtract interprets the given string as a NaCl-signed messaged, in
+// the keybase NaclSigInfo (v1) format. It will check that the signature verified, and if so,
+// will return the key that was used for the verification, the payload of the signature,
+// the full body of the decoded SignInfo, and an error
+func NaclVerifyAndExtract(s string) (key GenericKey, payload []byte, fullBody []byte, err error) {
+	fullBody, err = base64.StdEncoding.DecodeString(s)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+
+	packet, err := DecodePacket(fullBody)
+	if err != nil {
+		return nil, nil, nil, err
 	}
 
 	naclSig, ok := packet.Body.(*NaclSigInfo)
 	if !ok {
 		err = UnmarshalError{"NACL signature"}
-		return
+		return nil, nil, nil, err
 	}
 
-	err = naclSig.Verify()
+	var nk *NaclSigningKeyPublic
+	err, nk = naclSig.Verify()
 	if err != nil {
-		return
+		return nil, nil, nil, err
 	}
 
-	nkid := keybase1.KIDFromSlice(naclSig.Kid)
-	if nkid.NotEqual(k.GetKID()) {
-		err = WrongKidError{nkid, k.GetKID()}
-		return
-	}
-
-	msg = naclSig.Payload
-	id = ComputeSigIDFromSigBody(body)
-	return
+	key = NaclSigningKeyPair{Public: *nk}
+	payload = naclSig.Payload
+	return key, payload, fullBody, nil
 }
 
 func (k NaclSigningKeyPair) VerifyString(sig string, msg []byte) (id keybase1.SigID, err error) {
@@ -365,12 +389,7 @@ func (k NaclDHKeyPair) VerifyString(sig string, msg []byte) (id keybase1.SigID, 
 }
 
 func (s *NaclSigInfo) ToPacket() (ret *KeybasePacket, err error) {
-	ret = &KeybasePacket{
-		Version: KeybasePacketV1,
-		Tag:     TagSignature,
-	}
-	ret.Body = s
-	return
+	return NewKeybasePacket(s, TagSignature, KeybasePacketV1)
 }
 
 func (p KeybasePacket) ToNaclSigInfo() (*NaclSigInfo, error) {
@@ -393,15 +412,15 @@ func KIDToNaclSigningKeyPublic(bk []byte) *NaclSigningKeyPublic {
 	return &ret
 }
 
-func (s NaclSigInfo) Verify() error {
+func (s NaclSigInfo) Verify() (error, *NaclSigningKeyPublic) {
 	key := KIDToNaclSigningKeyPublic(s.Kid)
 	if key == nil {
-		return BadKeyError{}
+		return BadKeyError{}, nil
 	}
 	if !key.Verify(s.Payload, &s.Sig) {
-		return VerificationError{}
+		return VerificationError{}, nil
 	}
-	return nil
+	return nil, key
 }
 
 func (s *NaclSigInfo) ArmoredEncode() (ret string, err error) {
@@ -409,10 +428,10 @@ func (s *NaclSigInfo) ArmoredEncode() (ret string, err error) {
 }
 
 // NaCl keys are never wrapped for the server.
-func (k NaclSigningKeyPair) ToServerSKB(gc *GlobalContext, t *triplesec.Cipher, gen PassphraseGeneration) (*SKB, error) {
+func (k NaclSigningKeyPair) ToServerSKB(gc *GlobalContext, t Triplesec, gen PassphraseGeneration) (*SKB, error) {
 	return nil, fmt.Errorf("NaCl keys should never be encrypted for the server.")
 }
-func (k NaclDHKeyPair) ToServerSKB(gc *GlobalContext, t *triplesec.Cipher, gen PassphraseGeneration) (*SKB, error) {
+func (k NaclDHKeyPair) ToServerSKB(gc *GlobalContext, t Triplesec, gen PassphraseGeneration) (*SKB, error) {
 	return nil, fmt.Errorf("NaCl keys should never be encrypted for the server.")
 }
 
@@ -562,6 +581,11 @@ func (k NaclDHKeyPair) CanEncrypt() bool { return true }
 // CanDecrypt returns true if there's a private key available
 func (k NaclDHKeyPair) CanDecrypt() bool { return k.Private != nil }
 
+func (k NaclDHKeyPair) IsNil() bool {
+	var empty NaclDHKeyPublic
+	return bytes.Equal(k.Public[:], empty[:])
+}
+
 // Encrypt a message for the given sender.  If sender is nil, an ephemeral
 // keypair will be invented
 func (k NaclDHKeyPair) Encrypt(msg []byte, sender *NaclDHKeyPair) (*NaclEncryptionInfo, error) {
@@ -617,12 +641,7 @@ func (k NaclDHKeyPair) EncryptToString(plaintext []byte, sender GenericKey) (str
 
 // ToPacket implements the Packetable interface.
 func (k *NaclEncryptionInfo) ToPacket() (ret *KeybasePacket, err error) {
-	ret = &KeybasePacket{
-		Version: KeybasePacketV1,
-		Tag:     TagEncryption,
-	}
-	ret.Body = k
-	return
+	return NewKeybasePacket(k, TagEncryption, KeybasePacketV1)
 }
 
 // DecryptFromString decrypts the output of EncryptToString above,

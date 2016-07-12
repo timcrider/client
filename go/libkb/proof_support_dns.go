@@ -1,10 +1,13 @@
+// Copyright 2015 Keybase, Inc. All rights reserved. Use of
+// this source code is governed by the included BSD license.
+
 package libkb
 
 import (
 	"net"
 	"strings"
 
-	keybase1 "github.com/keybase/client/protocol/go"
+	keybase1 "github.com/keybase/client/go/protocol"
 	jsonw "github.com/keybase/go-jsonw"
 )
 
@@ -19,6 +22,8 @@ type DNSChecker struct {
 func NewDNSChecker(p RemoteProofChainLink) (*DNSChecker, ProofError) {
 	return &DNSChecker{p}, nil
 }
+
+func (rc *DNSChecker) GetTorError() ProofError { return ProofErrorDNSOverTor }
 
 func (rc *DNSChecker) CheckHint(h SigHint) ProofError {
 	_, sigID, err := OpenSig(rc.proof.GetArmoredSig())
@@ -80,28 +85,22 @@ func (rc *DNSChecker) CheckStatus(h SigHint) ProofError {
 
 type DNSServiceType struct{ BaseServiceType }
 
-func (t DNSServiceType) AllStringKeys() []string     { return t.BaseAllStringKeys(t) }
-func (t DNSServiceType) PrimaryStringKeys() []string { return t.BasePrimaryStringKeys(t) }
-
-func ParseDNS(s string) (ret string, err error) {
-	if strings.HasPrefix(s, "dns://") {
-		s = s[6:]
-	}
-	if !IsValidHostname(s) {
-		err = InvalidHostnameError{s}
-	} else {
-		ret = s
-	}
-	return
-}
-
-func (t DNSServiceType) CheckUsername(s string) error {
-	_, e := ParseDNS(s)
-	return e
-}
+func (t DNSServiceType) AllStringKeys() []string { return t.BaseAllStringKeys(t) }
 
 func (t DNSServiceType) NormalizeUsername(s string) (string, error) {
-	return ParseDNS(s)
+	if !IsValidHostname(s) {
+		return "", InvalidHostnameError{s}
+	}
+	return strings.ToLower(s), nil
+}
+
+func (t DNSServiceType) NormalizeRemoteName(s string) (string, error) {
+	// Allow a leading 'dns://' and preserve case.
+	s = strings.TrimPrefix(s, "dns://")
+	if !IsValidHostname(s) {
+		return "", InvalidHostnameError{s}
+	}
+	return s, nil
 }
 
 func (t DNSServiceType) ToChecker() Checker {
@@ -131,9 +130,9 @@ func (t DNSServiceType) PostInstructions(un string) *Markup {
 func (t DNSServiceType) DisplayName(un string) string { return "Dns" }
 func (t DNSServiceType) GetTypeName() string          { return "dns" }
 
-func (t DNSServiceType) RecheckProofPosting(tryNumber int, status keybase1.ProofStatus) (warning *Markup, err error) {
-	warning = FmtMarkup(`<p>We couldn't find a DNS proof for...<strong>yet</strong></p>
-<p>DNS propogation can be slow; we'll keep trying and email you the result</p>`)
+func (t DNSServiceType) RecheckProofPosting(tryNumber int, status keybase1.ProofStatus, dn string) (warning *Markup, err error) {
+	warning = FmtMarkup(`<p>We couldn't find a DNS proof for ` + dn + ` ... <strong>yet</strong></p>
+<p>DNS propagation can be slow; we'll keep trying and email you the result</p>`)
 	err = WaitForItError{}
 	return
 }
@@ -151,7 +150,7 @@ func (t DNSServiceType) LastWriterWins() bool { return false }
 func init() {
 	RegisterServiceType(DNSServiceType{})
 	RegisterSocialNetwork("dns")
-	RegisterProofCheckHook("dns",
+	RegisterMakeProofCheckerFunc("dns",
 		func(l RemoteProofChainLink) (ProofChecker, ProofError) {
 			return NewDNSChecker(l)
 		})

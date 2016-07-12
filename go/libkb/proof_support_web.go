@@ -1,11 +1,15 @@
+// Copyright 2015 Keybase, Inc. All rights reserved. Use of
+// this source code is governed by the included BSD license.
+
 package libkb
 
 import (
 	"fmt"
+	"net/url"
 	"regexp"
 	"strings"
 
-	keybase1 "github.com/keybase/client/protocol/go"
+	keybase1 "github.com/keybase/client/go/protocol"
 	jsonw "github.com/keybase/go-jsonw"
 )
 
@@ -21,6 +25,17 @@ var webKeybaseFiles = []string{".well-known/keybase.txt", "keybase.txt"}
 
 func NewWebChecker(p RemoteProofChainLink) (*WebChecker, ProofError) {
 	return &WebChecker{p}, nil
+}
+
+func (rc *WebChecker) GetTorError() ProofError {
+	urlBase := rc.proof.ToDisplayString()
+
+	u, err := url.Parse(urlBase)
+	if err != nil || u.Scheme != "https" {
+		return ProofErrorHTTPOverTor
+	}
+
+	return nil
 }
 
 func (rc *WebChecker) CheckHint(h SigHint) ProofError {
@@ -76,6 +91,14 @@ type WebServiceType struct{ BaseServiceType }
 func (t WebServiceType) AllStringKeys() []string     { return []string{"web", "http", "https"} }
 func (t WebServiceType) PrimaryStringKeys() []string { return []string{"https", "http"} }
 
+func (t WebServiceType) NormalizeUsername(s string) (ret string, err error) {
+	// The username is just the (lowercased) hostname.
+	if !IsValidHostname(s) {
+		return "", InvalidHostnameError{s}
+	}
+	return strings.ToLower(s), nil
+}
+
 func ParseWeb(s string) (hostname string, prot string, err error) {
 	rxx := regexp.MustCompile("^(http(s?))://(.*)$")
 	if v := rxx.FindStringSubmatch(s); v != nil {
@@ -90,12 +113,8 @@ func ParseWeb(s string) (hostname string, prot string, err error) {
 	return
 }
 
-func (t WebServiceType) CheckUsername(s string) error {
-	_, _, e := ParseWeb(s)
-	return e
-}
-
-func (t WebServiceType) NormalizeUsername(s string) (ret string, err error) {
+func (t WebServiceType) NormalizeRemoteName(s string) (ret string, err error) {
+	// The remote name is a full (case-preserved) URL.
 	var prot, host string
 	if host, prot, err = ParseWeb(s); err != nil {
 		return
@@ -174,7 +193,7 @@ func (t WebServiceType) PostInstructions(un string) *Markup {
 func (t WebServiceType) DisplayName(un string) string { return "Web" }
 func (t WebServiceType) GetTypeName() string          { return "web" }
 
-func (t WebServiceType) RecheckProofPosting(tryNumber int, status keybase1.ProofStatus) (warning *Markup, err error) {
+func (t WebServiceType) RecheckProofPosting(tryNumber int, status keybase1.ProofStatus, _ string) (warning *Markup, err error) {
 	if status == keybase1.ProofStatus_PERMISSION_DENIED {
 		warning = FmtMarkup("Permission denied! Make sure your proof page is <strong>public</strong>.")
 	} else {
@@ -196,7 +215,7 @@ func (t WebServiceType) LastWriterWins() bool { return false }
 func init() {
 	RegisterServiceType(WebServiceType{})
 	RegisterSocialNetwork("web")
-	RegisterProofCheckHook("http",
+	RegisterMakeProofCheckerFunc("http",
 		func(l RemoteProofChainLink) (ProofChecker, ProofError) {
 			return NewWebChecker(l)
 		})

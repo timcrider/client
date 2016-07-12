@@ -1,12 +1,16 @@
+// Copyright 2015 Keybase, Inc. All rights reserved. Use of
+// this source code is governed by the included BSD license.
+
 package libkb
 
 import (
 	"errors"
 	"fmt"
+	"os"
+	"os/exec"
 	"strings"
 
-	keybase1 "github.com/keybase/client/protocol/go"
-	jsonw "github.com/keybase/go-jsonw"
+	keybase1 "github.com/keybase/client/go/protocol"
 )
 
 //=============================================================================
@@ -20,7 +24,7 @@ type ProofError interface {
 
 func ProofErrorIsSoft(pe ProofError) bool {
 	s := pe.GetProofStatus()
-	return s >= keybase1.ProofStatus_BASE_ERROR && s < keybase1.ProofStatus_BASE_HARD_ERROR
+	return (s >= keybase1.ProofStatus_BASE_ERROR && s < keybase1.ProofStatus_BASE_HARD_ERROR)
 }
 
 func ProofErrorToState(pe ProofError) keybase1.ProofState {
@@ -56,10 +60,21 @@ type ProofAPIError struct {
 	url string
 }
 
-// Might be overkill, let's revisit...
-//func (e *ProofApiError) Error() string {
-//	return fmt.Sprintf("%s (url=%s; code=%d)", e.Desc, e.url, int(e.Status))
-//}
+var ProofErrorDNSOverTor = &ProofErrorImpl{
+	Status: keybase1.ProofStatus_TOR_SKIPPED,
+	Desc:   "DNS proofs aren't reliable over Tor",
+}
+
+var ProofErrorHTTPOverTor = &ProofErrorImpl{
+	Status: keybase1.ProofStatus_TOR_SKIPPED,
+	Desc:   "HTTP proofs aren't reliable over Tor",
+}
+
+type TorSessionRequiredError struct{}
+
+func (t TorSessionRequiredError) Error() string {
+	return "We can't send out PII in Tor-Strict mode; but it's needed for this operation"
+}
 
 func NewProofAPIError(s keybase1.ProofStatus, u string, d string, a ...interface{}) *ProofAPIError {
 	base := NewProofError(s, d, a...)
@@ -75,7 +90,11 @@ func XapiError(err error, u string) *ProofAPIError {
 		case 3:
 			code = keybase1.ProofStatus_HTTP_300
 		case 4:
-			code = keybase1.ProofStatus_HTTP_400
+			if ae.Code == 429 {
+				code = keybase1.ProofStatus_HTTP_429
+			} else {
+				code = keybase1.ProofStatus_HTTP_400
+			}
 		case 5:
 			code = keybase1.ProofStatus_HTTP_500
 		default:
@@ -166,12 +185,12 @@ func (e UnexpectedKeyError) Error() string {
 //=============================================================================
 
 type UserNotFoundError struct {
-	uid keybase1.UID
-	msg string
+	UID keybase1.UID
+	Msg string
 }
 
 func (u UserNotFoundError) Error() string {
-	return fmt.Sprintf("User %s wasn't found (%s)", u.uid, u.msg)
+	return fmt.Sprintf("User %s wasn't found (%s)", u.UID, u.Msg)
 }
 
 //=============================================================================
@@ -205,11 +224,14 @@ func (e BadSigError) Error() string {
 //=============================================================================
 
 type NotFoundError struct {
-	msg string
+	Msg string
 }
 
 func (e NotFoundError) Error() string {
-	return e.msg
+	if len(e.Msg) == 0 {
+		return "Not found"
+	}
+	return e.Msg
 }
 
 //=============================================================================
@@ -246,6 +268,12 @@ type NoActiveKeyError struct {
 
 func (e NoActiveKeyError) Error() string {
 	return fmt.Sprintf("user %s has no active keys", e.Username)
+}
+
+type NoSyncedPGPKeyError struct{}
+
+func (e NoSyncedPGPKeyError) Error() string {
+	return "No synced secret PGP key found on keybase.io"
 }
 
 //=============================================================================
@@ -309,7 +337,7 @@ type PassphraseError struct {
 func (p PassphraseError) Error() string {
 	msg := "Bad passphrase"
 	if len(p.Msg) != 0 {
-		msg = msg + ": " + p.Msg
+		msg = msg + ": " + p.Msg + "."
 	}
 	return msg
 }
@@ -352,22 +380,12 @@ func (a AppStatusError) IsBadField(s string) bool {
 	return found
 }
 
-func NewAppStatusError(jw *jsonw.Wrapper) AppStatusError {
-	code, _ := jw.AtKey("code").GetInt64()
-	desc, _ := jw.AtKey("desc").GetString()
-	name, _ := jw.AtKey("name").GetString()
-	tab := make(map[string]string)
-	fields := jw.AtKey("fields")
-	if keys, _ := fields.Keys(); keys != nil && len(keys) > 0 {
-		for _, k := range keys {
-			tab[k], _ = fields.AtKey(k).GetString()
-		}
-	}
+func NewAppStatusError(ast *AppStatus) AppStatusError {
 	return AppStatusError{
-		Code:   int(code),
-		Name:   name,
-		Desc:   desc,
-		Fields: tab,
+		Code:   ast.Code,
+		Name:   ast.Name,
+		Desc:   ast.Desc,
+		Fields: ast.Fields,
 	}
 }
 
@@ -391,11 +409,11 @@ func (a AppStatusError) Error() string {
 //=============================================================================
 
 type GpgError struct {
-	m string
+	M string
 }
 
 func (e GpgError) Error() string {
-	return fmt.Sprintf("GPG error: %s", e.m)
+	return fmt.Sprintf("GPG error: %s", e.M)
 }
 
 func ErrorToGpgError(e error) GpgError {
@@ -415,6 +433,12 @@ func ErrorToGpgIndexError(l int, e error) GpgIndexError {
 	return GpgIndexError{l, e.Error()}
 }
 
+type GPGUnavailableError struct{}
+
+func (g GPGUnavailableError) Error() string {
+	return "GPG is unavailable on this device"
+}
+
 //=============================================================================
 
 type LoginRequiredError struct {
@@ -427,6 +451,18 @@ func (e LoginRequiredError) Error() string {
 		msg = fmt.Sprintf("%s: %s", msg, e.Context)
 	}
 	return msg
+}
+
+type ReloginRequiredError struct{}
+
+func (e ReloginRequiredError) Error() string {
+	return "Login required due to an unexpected error since your previous login"
+}
+
+type DeviceRequiredError struct{}
+
+func (e DeviceRequiredError) Error() string {
+	return "Login required"
 }
 
 //=============================================================================
@@ -530,12 +566,30 @@ func (h ProtocolDowngradeError) Error() string {
 
 //=============================================================================
 
+type ProfileNotPublicError struct {
+	msg string
+}
+
+func (p ProfileNotPublicError) Error() string {
+	return p.msg
+}
+
+//=============================================================================
+
 type BadUsernameError struct {
-	n string
+	N string
 }
 
 func (e BadUsernameError) Error() string {
-	return "Bad username: '" + e.n + "'"
+	return "Bad username: '" + e.N + "'"
+}
+
+//=============================================================================
+
+type BadNameError string
+
+func (e BadNameError) Error() string {
+	return fmt.Sprintf("Bad username or email: %s", string(e))
 }
 
 //=============================================================================
@@ -549,11 +603,11 @@ func (e NoUsernameError) Error() string {
 //=============================================================================
 
 type UnmarshalError struct {
-	t string
+	T string
 }
 
 func (u UnmarshalError) Error() string {
-	return "Bad " + u.t + " packet"
+	return "Bad " + u.T + " packet"
 }
 
 type VerificationError struct{}
@@ -600,6 +654,32 @@ type KeyUnimplementedError struct{}
 
 func (k KeyUnimplementedError) Error() string {
 	return "Key function isn't implemented yet"
+}
+
+type NoPGPEncryptionKeyError struct {
+	User         string
+	HasDeviceKey bool
+}
+
+func (e NoPGPEncryptionKeyError) Error() string {
+	var other string
+	if e.HasDeviceKey {
+		other = "; they do have a device key, so you can `keybase encrypt` to them instead"
+	}
+	return fmt.Sprintf("User %s doesn't have a PGP key%s", e.User, other)
+}
+
+type NoNaClEncryptionKeyError struct {
+	User      string
+	HasPGPKey bool
+}
+
+func (e NoNaClEncryptionKeyError) Error() string {
+	var other string
+	if e.HasPGPKey {
+		other = "; they do have a PGP key, so you can `keybase pgp encrypt` to them instead"
+	}
+	return fmt.Sprintf("User %s doesn't have a device key%s", e.User, other)
 }
 
 //=============================================================================
@@ -653,11 +733,11 @@ func (e SelfTrackError) Error() string {
 //=============================================================================
 
 type NoUIError struct {
-	which string
+	Which string
 }
 
 func (e NoUIError) Error() string {
-	return fmt.Sprintf("no %s-UI was available", e.which)
+	return fmt.Sprintf("no %s-UI was available", e.Which)
 }
 
 //=============================================================================
@@ -696,6 +776,14 @@ func (e NotConfirmedError) Error() string {
 
 //=============================================================================
 
+type SibkeyAlreadyExistsError struct{}
+
+func (e SibkeyAlreadyExistsError) Error() string {
+	return "Key is already selected for use on Keybase"
+}
+
+//=============================================================================
+
 type ProofNotYetAvailableError struct{}
 
 func (e ProofNotYetAvailableError) Error() string {
@@ -718,6 +806,8 @@ type ProofNotFoundForUsernameError struct {
 func (e ProofNotFoundForUsernameError) Error() string {
 	return fmt.Sprintf("proof not found for %q on %q", e.Username, e.Service)
 }
+
+//=============================================================================
 
 //=============================================================================
 
@@ -899,15 +989,57 @@ func (c CanceledError) Error() string {
 	return c.M
 }
 
+func NewCanceledError(m string) CanceledError {
+	return CanceledError{M: m}
+}
+
+type InputCanceledError struct{}
+
+func (e InputCanceledError) Error() string {
+	return "Input canceled"
+}
+
+type SkipSecretPromptError struct{}
+
+func (e SkipSecretPromptError) Error() string {
+	return "Skipping secret prompt due to recent user cancel of secret prompt"
+}
+
 //=============================================================================
 
-var ErrNoDevice = errors.New("No device found")
-var ErrTimeout = errors.New("Operation timed out")
+type NoDeviceError struct {
+	Reason string
+}
+
+func (e NoDeviceError) Error() string {
+	return fmt.Sprintf("No device found %s", e.Reason)
+}
+
+type TimeoutError struct{}
+
+func (e TimeoutError) Error() string {
+	return "Operation timed out"
+}
+
+type ReceiverDeviceError struct {
+	Msg string
+}
+
+func NewReceiverDeviceError(expected, received keybase1.DeviceID) ReceiverDeviceError {
+	return ReceiverDeviceError{Msg: fmt.Sprintf("Device ID mismatch in message receiver, got %q, expected %q", received, expected)}
+}
+
+func (e ReceiverDeviceError) Error() string {
+	return e.Msg
+}
+
+type InvalidKexPhraseError struct{}
+
+func (e InvalidKexPhraseError) Error() string {
+	return "Invalid kex secret phrase"
+}
+
 var ErrNilUser = errors.New("User is nil")
-var ErrReceiverDevice = errors.New("Device ID mismatch in message receiver")
-var ErrInvalidKexSession = errors.New("Invalid kex session ID")
-var ErrInvalidKexPhrase = errors.New("Invalid kex secret phrase")
-var ErrCannotGenerateDevice = errors.New("Cannot generate new device ID")
 
 //=============================================================================
 
@@ -951,12 +1083,12 @@ func (e APINetError) Error() string {
 
 //=============================================================================
 
-type PGPDecError struct {
+type NoDecryptionKeyError struct {
 	Msg string
 }
 
-func (e PGPDecError) Error() string {
-	return fmt.Sprintf("pgp decrypt error: %s", e.Msg)
+func (e NoDecryptionKeyError) Error() string {
+	return fmt.Sprintf("decrypt error: %s", e.Msg)
 }
 
 //=============================================================================
@@ -970,21 +1102,21 @@ func (e DecryptionError) Error() string {
 //=============================================================================
 
 type ChainLinkPrevHashMismatchError struct {
-	err error
+	Msg string
 }
 
 func (e ChainLinkPrevHashMismatchError) Error() string {
-	return fmt.Sprintf("Chain link prev hash mismatch error: %s", e.err)
+	return fmt.Sprintf("Chain link prev hash mismatch error: %s", e.Msg)
 }
 
 //=============================================================================
 
 type ChainLinkWrongSeqnoError struct {
-	err error
+	Msg string
 }
 
 func (e ChainLinkWrongSeqnoError) Error() string {
-	return fmt.Sprintf("Chain link wrong seqno error: %s", e.err)
+	return fmt.Sprintf("Chain link wrong seqno error: %s", e.Msg)
 }
 
 //=============================================================================
@@ -1035,6 +1167,25 @@ func (e IdentifyTimeoutError) Error() string {
 
 //=============================================================================
 
+type IdentifyDidNotCompleteError struct{}
+
+func (e IdentifyDidNotCompleteError) Error() string {
+	return "Identification did not complete."
+}
+
+//=============================================================================
+
+type IdentifyFailedError struct {
+	Assertion string
+	Reason    string
+}
+
+func (e IdentifyFailedError) Error() string {
+	return fmt.Sprintf("For user %q: %s", e.Assertion, e.Reason)
+}
+
+//=============================================================================
+
 type NotLatestSubchainError struct {
 	Msg string
 }
@@ -1055,4 +1206,212 @@ type KeyVersionError struct{}
 
 func (k KeyVersionError) Error() string {
 	return "Invalid key version"
+}
+
+//=============================================================================
+
+type PIDFileLockError struct {
+	Filename string
+}
+
+func (e PIDFileLockError) Error() string {
+	return fmt.Sprintf("error locking %s: server already running", e.Filename)
+}
+
+type SecretStoreError struct {
+	Msg string
+}
+
+func (e SecretStoreError) Error() string {
+	return "Secret store error: " + e.Msg
+}
+
+type PassphraseProvisionImpossibleError struct{}
+
+func (e PassphraseProvisionImpossibleError) Error() string {
+	return "Passphrase provision is not possible since you have at least one provisioned device or pgp key already"
+}
+
+type ProvisionUnavailableError struct{}
+
+func (e ProvisionUnavailableError) Error() string {
+	return "Provision unavailable as you don't have access to any of your devices"
+}
+
+type InvalidArgumentError struct {
+	Msg string
+}
+
+func (e InvalidArgumentError) Error() string {
+	return fmt.Sprintf("invalid argument: %s", e.Msg)
+}
+
+type RetryExhaustedError struct {
+}
+
+func (e RetryExhaustedError) Error() string {
+	return "Prompt attempts exhausted."
+}
+
+//=============================================================================
+
+type PGPPullLoggedOutError struct{}
+
+func (e PGPPullLoggedOutError) Error() string {
+	return "When running `pgp pull` logged out, you must specify users to pull keys for"
+}
+
+//=============================================================================
+
+type UIDelegationUnavailableError struct{}
+
+func (e UIDelegationUnavailableError) Error() string {
+	return "This process does not support UI delegation"
+}
+
+//=============================================================================
+
+type UnmetAssertionError struct {
+	User   string
+	Remote bool
+}
+
+func (e UnmetAssertionError) Error() string {
+	which := "local"
+	if e.Remote {
+		which = "remote"
+	}
+	return fmt.Sprintf("Unmet %s assertions for user %q", which, e.User)
+}
+
+//=============================================================================
+
+type ResolutionError struct {
+	Input string
+	Msg   string
+}
+
+func (e ResolutionError) Error() string {
+	return fmt.Sprintf("In resolving '%s': %s", e.Input, e.Msg)
+}
+
+//=============================================================================
+
+type NoUIDError struct{}
+
+func (e NoUIDError) Error() string {
+	return "No UID given but one was expected"
+}
+
+//=============================================================================
+
+type TrackingBrokeError struct{}
+
+func (e TrackingBrokeError) Error() string {
+	return "Tracking broke"
+}
+
+//=============================================================================
+
+type KeybaseSaltpackError struct{}
+
+func (e KeybaseSaltpackError) Error() string {
+	return "Bad use of saltpack for Keybase"
+}
+
+//=============================================================================
+
+type TrackStaleError struct {
+	FirstTrack bool
+}
+
+func (e TrackStaleError) Error() string {
+	return "Tracking statement was stale"
+}
+
+//=============================================================================
+
+type UnknownStreamError struct{}
+
+func (e UnknownStreamError) Error() string {
+	return "unknown stream format"
+}
+
+type WrongCryptoFormatError struct {
+	Wanted, Received CryptoMessageFormat
+	Operation        string
+}
+
+func (e WrongCryptoFormatError) Error() string {
+	ret := "Wrong crypto message format"
+	switch {
+	case e.Wanted == CryptoMessageFormatPGP && e.Received == CryptoMessageFormatSaltpack:
+		ret += "; wanted PGP but got saltpack"
+		if len(e.Operation) > 0 {
+			ret += "; try `keybase " + e.Operation + "` instead"
+		}
+	case e.Wanted == CryptoMessageFormatSaltpack && e.Received == CryptoMessageFormatPGP:
+		ret += "; wanted saltpack but got PGP"
+		if len(e.Operation) > 0 {
+			ret += "; try `keybase pgp " + e.Operation + "` instead"
+		}
+	}
+	return ret
+}
+
+//=============================================================================
+
+type BadInvitationCodeError struct{}
+
+func (e BadInvitationCodeError) Error() string {
+	return "bad invitation code"
+}
+
+type NoMatchingGPGKeysError struct {
+	Fingerprints    []string
+	HasActiveDevice bool // true if the user has an active device that they chose not to use
+}
+
+func (e NoMatchingGPGKeysError) Error() string {
+	return fmt.Sprintf("No private GPG keys found on this device that match account PGP keys %s", strings.Join(e.Fingerprints, ", "))
+}
+
+type DeviceAlreadyProvisionedError struct{}
+
+func (e DeviceAlreadyProvisionedError) Error() string {
+	return "Device already provisioned for current user"
+}
+
+type DirExecError struct {
+	Path string
+}
+
+func (e DirExecError) Error() string {
+	return fmt.Sprintf("file %q is a directory and not executable", e.Path)
+}
+
+type FileExecError struct {
+	Path string
+}
+
+func (e FileExecError) Error() string {
+	return fmt.Sprintf("file %q is not executable", e.Path)
+}
+
+func IsExecError(err error) bool {
+	if err == nil {
+		return false
+	}
+
+	switch err.(type) {
+	case DirExecError:
+		return true
+	case FileExecError:
+		return true
+	case *exec.Error:
+		return true
+	case *os.PathError:
+		return true
+	}
+	return false
 }

@@ -1,3 +1,6 @@
+// Copyright 2015 Keybase, Inc. All rights reserved. Use of
+// this source code is governed by the included BSD license.
+
 package libkb
 
 import (
@@ -100,7 +103,7 @@ func FindBase64Blocks(s string) []string {
 
 func FindFirstBase64Block(s string) string {
 	v := FindBase64Blocks(s)
-	if v != nil && len(v) > 0 {
+	if len(v) > 0 {
 		return v[0]
 	}
 	return ""

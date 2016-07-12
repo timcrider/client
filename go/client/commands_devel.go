@@ -1,4 +1,7 @@
-// +build !release
+// Copyright 2015 Keybase, Inc. All rights reserved. Use of
+// this source code is governed by the included BSD license.
+
+// +build !production
 
 // this is the list of commands for the devel version of the
 // client.
@@ -7,47 +10,27 @@ package client
 import (
 	"github.com/keybase/cli"
 	"github.com/keybase/client/go/libcmdline"
+	"github.com/keybase/client/go/libkb"
 )
 
-func GetCommands(cl *libcmdline.CommandLine) []cli.Command {
+func getBuildSpecificCommands(cl *libcmdline.CommandLine, g *libkb.GlobalContext) []cli.Command {
 	return []cli.Command{
-		NewCmdBTC(cl),
-		NewCmdCert(cl),
-		NewCmdConfig(cl),
-		NewCmdCtl(cl),
-		NewCmdDb(cl),
-		NewCmdDevice(cl),
-		NewCmdDoctor(cl),
-		NewCmdFavorite(cl),
-		NewCmdID(cl),
-		NewCmdLaunchd(cl),
-		NewCmdListTracking(cl),
-		NewCmdListTrackers(cl),
-		NewCmdLogin(cl),
-		NewCmdLogout(cl),
-		NewCmdPaperKey(cl),
-		NewCmdPassphrase(cl),
-		NewCmdPGP(cl),
-		NewCmdPing(cl),
-		NewCmdProve(cl),
-		NewCmdReset(cl),
-		NewCmdRevoke(cl),
-		NewCmdSearch(cl),
-		NewCmdSigs(cl),
-		NewCmdSignup(cl),
-		NewCmdStatus(cl),
+		NewCmdAPICall(cl, g),
+		NewCmdCheckTracking(cl, g),
+		NewCmdFavorite(cl, g),
+		NewCmdFakeTrackingChanged(cl, g),
+		newCmdFS(cl, g),
+		NewCmdSecretKey(cl, g),
+		NewCmdShowNotifications(cl, g),
 		NewCmdStress(cl),
-		NewCmdTrack(cl),
-		NewCmdUntrack(cl),
-		NewCmdVersion(cl),
+		NewCmdTestPassphrase(cl, g),
+		NewCmdTestFSNotify(cl, g),
+		NewCmdPaperProvision(cl, g),
+		NewCmdPGPProvision(cl, g),
 	}
 }
 
-var extraSignupFlags = []cli.Flag{
-	cli.StringFlag{
-		Name:  "u, username",
-		Usage: "Specify a username",
-	},
+var restrictedSignupFlags = []cli.Flag{
 	cli.StringFlag{
 		Name:  "p, passphrase",
 		Usage: "Specify a passphrase",
@@ -61,7 +44,16 @@ var extraSignupFlags = []cli.Flag{
 		Usage: "Batch mode (don't prompt, use all defaults)",
 	},
 	cli.BoolFlag{
-		Name:  "devel",
-		Usage: "run the client in development mode",
+		Name:  "pgp",
+		Usage: "Add a server-synced pgp key",
 	},
 }
+
+var restrictedProveFlags = []cli.Flag{
+	cli.BoolFlag{
+		Name:  "auto",
+		Usage: "[rooter only] Automatically make the rooter toot proof",
+	},
+}
+
+const develUsage = true

@@ -1,3 +1,6 @@
+// Copyright 2015 Keybase, Inc. All rights reserved. Use of
+// this source code is governed by the included BSD license.
+
 package engine
 
 import (
@@ -5,13 +8,11 @@ import (
 	"fmt"
 
 	"github.com/keybase/client/go/libkb"
-	keybase1 "github.com/keybase/client/protocol/go"
+	keybase1 "github.com/keybase/client/go/protocol"
 	triplesec "github.com/keybase/go-triplesec"
 )
 
 type SignupJoinEngine struct {
-	signupState *SignupState
-
 	uid            keybase1.UID
 	session        string
 	csrf           string
@@ -137,7 +138,8 @@ func (s *SignupJoinEngine) WriteOut(lctx libkb.LoginContext, salt []byte) error 
 	if err := lctx.CreateLoginSessionWithSalt(s.username.String(), salt); err != nil {
 		return err
 	}
-	if err := lctx.SaveState(s.session, s.csrf, s.username, s.uid); err != nil {
+	var nilDeviceID keybase1.DeviceID
+	if err := lctx.SaveState(s.session, s.csrf, s.username, s.uid, nilDeviceID); err != nil {
 		return err
 	}
 	return nil

@@ -1,3 +1,6 @@
+// Copyright 2015 Keybase, Inc. All rights reserved. Use of
+// this source code is governed by the included BSD license.
+
 package libkb
 
 import (
@@ -6,7 +9,7 @@ import (
 	"sync"
 	"time"
 
-	keybase1 "github.com/keybase/client/protocol/go"
+	keybase1 "github.com/keybase/client/go/protocol"
 	jsonw "github.com/keybase/go-jsonw"
 )
 
@@ -37,6 +40,7 @@ type TypedChainLink interface {
 	VerifyReverseSig(ckf ComputedKeyFamily) error
 	GetMerkleSeqno() int
 	GetDevice() *Device
+	DoOwnNewLinkFromServerNotifications(g *GlobalContext)
 }
 
 //=========================================================================
@@ -93,6 +97,12 @@ func (g *GenericChainLink) extractPGPFullHash(loc string) string {
 		}
 	}
 	return ""
+}
+
+func (g *GenericChainLink) DoOwnNewLinkFromServerNotifications(glob *GlobalContext) {}
+
+func CanonicalProofName(t TypedChainLink) string {
+	return strings.ToLower(t.ToDisplayString())
 }
 
 //
@@ -279,6 +289,7 @@ type ServiceBlock struct {
 	typ        string
 	id         string
 	proofState keybase1.ProofState
+	proofType  keybase1.ProofType
 }
 
 func (sb ServiceBlock) GetProofState() keybase1.ProofState { return sb.proofState }
@@ -300,7 +311,9 @@ func (sb ServiceBlock) LastWriterWins() bool {
 	return sb.social
 }
 
-func ParseServiceBlock(jw *jsonw.Wrapper) (sb *ServiceBlock, err error) {
+func (sb ServiceBlock) GetProofType() keybase1.ProofType { return sb.proofType }
+
+func ParseServiceBlock(jw *jsonw.Wrapper, pt keybase1.ProofType) (sb *ServiceBlock, err error) {
 	var social bool
 	var typ, id string
 
@@ -335,7 +348,7 @@ func ParseServiceBlock(jw *jsonw.Wrapper) (sb *ServiceBlock, err error) {
 	if len(typ) == 0 {
 		err = fmt.Errorf("Unrecognized Web proof @%s", jw.MarshalToDebug())
 	}
-	sb = &ServiceBlock{social: social, typ: typ, id: id}
+	sb = &ServiceBlock{social: social, typ: typ, id: id, proofType: pt}
 	return
 }
 
@@ -346,16 +359,13 @@ func ParseWebServiceBinding(base GenericChainLink) (ret RemoteProofChainLink, e 
 	var sptf string
 	ptf := base.packed.AtKey("proof_text_full")
 	if !ptf.IsNil() {
-		var err error
-		sptf, err = ptf.GetString()
-		if err == nil {
-			G.Log.Debug("Found proof_text_full: %s", sptf)
-		}
+		// TODO: add test that returning on err here is ok:
+		sptf, _ = ptf.GetString()
 	}
 
 	if jw.IsNil() {
 		ret, e = ParseSelfSigChainLink(base)
-	} else if sb, err := ParseServiceBlock(jw); err != nil {
+	} else if sb, err := ParseServiceBlock(jw, keybase1.ProofType_NONE); err != nil {
 		e = fmt.Errorf("%s @%s", err, base.ToDebugString())
 	} else if sb.social {
 		ret = NewSocialProofChainLink(base, sb.typ, sb.id, sptf)
@@ -379,9 +389,11 @@ func remoteProofInsertIntoTable(l RemoteProofChainLink, tab *IdentityTable) {
 //
 type TrackChainLink struct {
 	GenericChainLink
-	whom    string
-	untrack *UntrackChainLink
-	local   bool
+	whomUsername  string
+	whomUID       keybase1.UID
+	untrack       *UntrackChainLink
+	local         bool
+	tmpExpireTime time.Time // should only be relevant if local is set to true
 }
 
 func (l TrackChainLink) IsRemote() bool {
@@ -389,30 +401,44 @@ func (l TrackChainLink) IsRemote() bool {
 }
 
 func ParseTrackChainLink(b GenericChainLink) (ret *TrackChainLink, err error) {
-	var whom string
-	whom, err = b.payloadJSON.AtPath("body.track.basics.username").GetString()
+	var whomUsername string
+	whomUsername, err = b.payloadJSON.AtPath("body.track.basics.username").GetString()
 	if err != nil {
 		err = fmt.Errorf("Bad track statement @%s: %s", b.ToDebugString(), err)
-	} else {
-		ret = &TrackChainLink{b, whom, nil, false}
+		return
 	}
+
+	whomUID, err := GetUID(b.payloadJSON.AtPath("body.track.id"))
+	if err != nil {
+		err = fmt.Errorf("Bad track statement @%s: %s", b.ToDebugString(), err)
+		return
+	}
+
+	ret = &TrackChainLink{b, whomUsername, whomUID, nil, false, time.Time{}}
 	return
 }
 
 func (l *TrackChainLink) Type() string { return "track" }
 
 func (l *TrackChainLink) ToDisplayString() string {
-	return l.whom
+	return l.whomUsername
+}
+
+func (l *TrackChainLink) GetTmpExpireTime() (ret time.Time) {
+	if l.local {
+		ret = l.tmpExpireTime
+	}
+	return ret
 }
 
 func (l *TrackChainLink) insertIntoTable(tab *IdentityTable) {
 	tab.insertLink(l)
-	tab.tracks[l.whom] = append(tab.tracks[l.whom], l)
+	tab.tracks[l.whomUsername] = append(tab.tracks[l.whomUsername], l)
 }
 
 type TrackedKey struct {
 	KID         keybase1.KID
-	Fingerprint PGPFingerprint
+	Fingerprint *PGPFingerprint
 }
 
 func trackedKeyFromJSON(jw *jsonw.Wrapper) (TrackedKey, error) {
@@ -422,15 +448,12 @@ func trackedKeyFromJSON(jw *jsonw.Wrapper) (TrackedKey, error) {
 		return TrackedKey{}, err
 	}
 	ret.KID = kid
-	// TODO: Should we tolerate missing fingerprints? Will "body.track.key"
-	// ever be a non-PGP key, for example? I'm *very* hesitant about defining a
-	// new type that's basically a FOKID, right after we did all that work to
-	// delete FOKID.
+
+	// It's ok if key_fingerprint doesn't exist.  But if it does, then include it:
 	fp, err := GetPGPFingerprint(jw.AtKey("key_fingerprint"))
-	if err != nil {
-		return TrackedKey{}, err
+	if err == nil && fp != nil {
+		ret.Fingerprint = fp
 	}
-	ret.Fingerprint = *fp
 	return ret, nil
 }
 
@@ -440,16 +463,6 @@ func (l *TrackChainLink) GetTrackedKeys() ([]TrackedKey, error) {
 	set := make(map[keybase1.KID]bool)
 
 	var res []TrackedKey
-
-	keyJSON := l.payloadJSON.AtPath("body.track.key")
-	if !keyJSON.IsNil() {
-		tracked, err := trackedKeyFromJSON(keyJSON)
-		if err != nil {
-			return nil, err
-		}
-		res = append(res, tracked)
-		set[tracked.KID] = true
-	}
 
 	pgpKeysJSON := l.payloadJSON.AtPath("body.track.pgp_keys")
 	if !pgpKeysJSON.IsNil() {
@@ -470,6 +483,18 @@ func (l *TrackChainLink) GetTrackedKeys() ([]TrackedKey, error) {
 		}
 	}
 	return res, nil
+}
+
+func (l *TrackChainLink) GetEldestKID() (kid keybase1.KID, err error) {
+	keyJSON := l.payloadJSON.AtPath("body.track.key")
+	if keyJSON.IsNil() {
+		return kid, nil
+	}
+	tracked, err := trackedKeyFromJSON(keyJSON)
+	if err != nil {
+		return kid, err
+	}
+	return tracked.KID, nil
 }
 
 func (l *TrackChainLink) GetTrackedUID() (keybase1.UID, error) {
@@ -497,8 +522,10 @@ func (l *TrackChainLink) ToServiceBlocks() (ret []*ServiceBlock) {
 	for index := 0; index < ln; index++ {
 		proof := w.AtIndex(index).AtKey("remote_key_proof")
 		if i, e := proof.AtKey("state").GetInt(); e != nil {
-			G.Log.Warning("Bad 'state' in track statement: %s", e)
-		} else if sb, e := ParseServiceBlock(proof.AtKey("check_data_json")); e != nil {
+			l.G().Log.Warning("Bad 'state' in track statement: %s", e)
+		} else if t, e := proof.AtKey("proof_type").GetInt(); e != nil {
+			l.G().Log.Warning("Bad 'proof_type' in track statement: %s", e)
+		} else if sb, e := ParseServiceBlock(proof.AtKey("check_data_json"), keybase1.ProofType(t)); e != nil {
 			G.Log.Warning("Bad remote_key_proof.check_data_json: %s", e)
 		} else {
 			sb.proofState = keybase1.ProofState(i)
@@ -509,6 +536,11 @@ func (l *TrackChainLink) ToServiceBlocks() (ret []*ServiceBlock) {
 		}
 	}
 	return
+}
+
+func (l *TrackChainLink) DoOwnNewLinkFromServerNotifications(g *GlobalContext) {
+	g.Log.Debug("Post notification for new TrackChainLink")
+	g.NotifyRouter.HandleTrackingChanged(l.whomUID, l.whomUsername)
 }
 
 //
@@ -542,7 +574,7 @@ func ParseSibkeyChainLink(b GenericChainLink) (ret *SibkeyChainLink, err error) 
 	}
 
 	if jw := b.payloadJSON.AtPath("body.device"); !jw.IsNil() {
-		if device, err = ParseDevice(jw); err != nil {
+		if device, err = ParseDevice(jw, b.GetCTime()); err != nil {
 			return
 		}
 	}
@@ -566,13 +598,6 @@ func (s *SibkeyChainLink) insertIntoTable(tab *IdentityTable) {
 // VerifyReverseSig checks a SibkeyChainLink's reverse signature using the ComputedKeyFamily provided.
 func (s *SibkeyChainLink) VerifyReverseSig(ckf ComputedKeyFamily) (err error) {
 	var key GenericKey
-
-	if len(s.reverseSig) == 0 {
-		G.Log.Warning("!! Sibkey delegations without reverse sigs are soon to be retired!!")
-		G.Log.Warning("!! We're leaving them on for now for testing purposes!!")
-		G.Log.Warning("!! SibkeyChainLink: %s (device: %+v)", s.ToDisplayString(), s.device)
-		return
-	}
 
 	if key, err = ckf.FindKeyWithKIDUnsafe(s.GetDelegatedKid()); err != nil {
 		return err
@@ -698,7 +723,7 @@ type DeviceChainLink struct {
 
 func ParseDeviceChainLink(b GenericChainLink) (ret *DeviceChainLink, err error) {
 	var dobj *Device
-	if dobj, err = ParseDevice(b.payloadJSON.AtPath("body.device")); err != nil {
+	if dobj, err = ParseDevice(b.payloadJSON.AtPath("body.device"), b.GetCTime()); err != nil {
 	} else {
 		ret = &DeviceChainLink{b, dobj}
 	}
@@ -715,25 +740,33 @@ func (s *DeviceChainLink) insertIntoTable(tab *IdentityTable) {
 
 type UntrackChainLink struct {
 	GenericChainLink
-	whom string
+	whomUsername string
+	whomUID      keybase1.UID
 }
 
 func ParseUntrackChainLink(b GenericChainLink) (ret *UntrackChainLink, err error) {
-	var whom string
-	whom, err = b.payloadJSON.AtPath("body.untrack.basics.username").GetString()
+	var whomUsername string
+	whomUsername, err = b.payloadJSON.AtPath("body.untrack.basics.username").GetString()
 	if err != nil {
 		err = fmt.Errorf("Bad track statement @%s: %s", b.ToDebugString(), err)
-	} else {
-		ret = &UntrackChainLink{b, whom}
+		return
 	}
+
+	whomUID, err := GetUID(b.payloadJSON.AtPath("body.untrack.id"))
+	if err != nil {
+		err = fmt.Errorf("Bad track statement @%s: %s", b.ToDebugString(), err)
+		return
+	}
+
+	ret = &UntrackChainLink{b, whomUsername, whomUID}
 	return
 }
 
 func (u *UntrackChainLink) insertIntoTable(tab *IdentityTable) {
 	tab.insertLink(u)
-	if list, found := tab.tracks[u.whom]; !found {
-		G.Log.Notice("Bad untrack of %s; no previous tracking statement found",
-			u.whom)
+	if list, found := tab.tracks[u.whomUsername]; !found {
+		G.Log.Debug("| Useless untrack of %s; no previous tracking statement found",
+			u.whomUsername)
 	} else {
 		for _, obj := range list {
 			obj.untrack = u
@@ -742,12 +775,17 @@ func (u *UntrackChainLink) insertIntoTable(tab *IdentityTable) {
 }
 
 func (u *UntrackChainLink) ToDisplayString() string {
-	return u.whom
+	return u.whomUsername
 }
 
 func (u *UntrackChainLink) Type() string { return "untrack" }
 
 func (u *UntrackChainLink) IsRevocationIsh() bool { return true }
+
+func (u *UntrackChainLink) DoOwnNewLinkFromServerNotifications(g *GlobalContext) {
+	g.Log.Debug("Post notification for new UntrackChainLink")
+	g.NotifyRouter.HandleTrackingChanged(u.whomUID, u.whomUsername)
+}
 
 //
 //=========================================================================
@@ -820,7 +858,7 @@ type RevokeChainLink struct {
 func ParseRevokeChainLink(b GenericChainLink) (ret *RevokeChainLink, err error) {
 	var device *Device
 	if jw := b.payloadJSON.AtPath("body.device"); !jw.IsNil() {
-		if device, err = ParseDevice(jw); err != nil {
+		if device, err = ParseDevice(jw, b.GetCTime()); err != nil {
 			return
 		}
 	}
@@ -893,7 +931,7 @@ func (s *SelfSigChainLink) GetProofType() keybase1.ProofType { return keybase1.P
 
 func (s *SelfSigChainLink) ParseDevice() (err error) {
 	if jw := s.payloadJSON.AtPath("body.device"); !jw.IsNil() {
-		s.device, err = ParseDevice(jw)
+		s.device, err = ParseDevice(jw, s.GetCTime())
 	}
 	return err
 }
@@ -916,6 +954,7 @@ func ParseSelfSigChainLink(base GenericChainLink) (ret *SelfSigChainLink, err er
 //=========================================================================
 
 type IdentityTable struct {
+	Contextified
 	sigChain         *SigChain
 	revocations      map[keybase1.SigID]bool
 	links            map[keybase1.SigID]TypedChainLink
@@ -942,7 +981,7 @@ func (idt *IdentityTable) insertLink(l TypedChainLink) {
 	for _, rev := range l.GetRevocations() {
 		idt.revocations[rev] = true
 		if targ, found := idt.links[rev]; !found {
-			G.Log.Warning("Can't revoke signature %s @%s", rev, l.ToDebugString())
+			idt.G().Log.Warning("Can't revoke signature %s @%s", rev, l.ToDebugString())
 		} else {
 			targ.markRevoked(l)
 		}
@@ -950,7 +989,7 @@ func (idt *IdentityTable) insertLink(l TypedChainLink) {
 }
 
 func (idt *IdentityTable) MarkCheckResult(err ProofError) {
-	idt.checkResult = NewNowCheckResult(err)
+	idt.checkResult = NewNowCheckResult(idt.G(), err)
 }
 
 func NewTypedChainLink(cl *ChainLink) (ret TypedChainLink, w Warning) {
@@ -1002,8 +1041,9 @@ func NewTypedChainLink(cl *ChainLink) (ret TypedChainLink, w Warning) {
 	return
 }
 
-func NewIdentityTable(eldest keybase1.KID, sc *SigChain, h *SigHints) (*IdentityTable, error) {
+func NewIdentityTable(g *GlobalContext, eldest keybase1.KID, sc *SigChain, h *SigHints) (*IdentityTable, error) {
 	ret := &IdentityTable{
+		Contextified:     NewContextified(g),
 		sigChain:         sc,
 		revocations:      make(map[keybase1.SigID]bool),
 		links:            make(map[keybase1.SigID]TypedChainLink),
@@ -1016,25 +1056,30 @@ func NewIdentityTable(eldest keybase1.KID, sc *SigChain, h *SigHints) (*Identity
 	return ret, err
 }
 
-func (idt *IdentityTable) populate() error {
-	G.Log.Debug("+ Populate ID Table")
-	links, err := idt.sigChain.LimitToEldestKID(idt.eldest)
-	if err != nil {
+func (idt *IdentityTable) populate() (err error) {
+	defer idt.G().Trace("IdentityTable::populate", func() error { return err })()
+
+	var links []*ChainLink
+	if links, err = idt.sigChain.GetCurrentSubchain(idt.eldest); err != nil {
 		return err
 	}
+
 	for _, link := range links {
 		if isBad, reason := link.IsBad(); isBad {
-			G.Log.Debug("Ignoring bad chain link with sig ID %s: %s", link.GetSigID(), reason)
+			idt.G().Log.Debug("Ignoring bad chain link with sig ID %s: %s", link.GetSigID(), reason)
 			continue
 		}
 
 		tcl, w := NewTypedChainLink(link)
 		tcl.insertIntoTable(idt)
 		if w != nil {
-			w.Warn()
+			w.Warn(idt.G())
+		}
+		if link.isOwnNewLinkFromServer {
+			link.isOwnNewLinkFromServer = false
+			tcl.DoOwnNewLinkFromServerNotifications(idt.G())
 		}
 	}
-	G.Log.Debug("- Populate ID Table")
 	return nil
 }
 
@@ -1043,7 +1088,7 @@ func (idt *IdentityTable) insertRemoteProof(link RemoteProofChainLink) {
 	idt.remoteProofLinks.Insert(link, nil)
 }
 
-func (idt *IdentityTable) VerifySelfSig(s string, uid keybase1.UID) bool {
+func (idt *IdentityTable) VerifySelfSig(nun NormalizedUsername, uid keybase1.UID) bool {
 	list := idt.Order
 	ln := len(list)
 	for i := ln - 1; i >= 0; i-- {
@@ -1052,8 +1097,8 @@ func (idt *IdentityTable) VerifySelfSig(s string, uid keybase1.UID) bool {
 		if link.IsRevoked() {
 			continue
 		}
-		if link.GetUsername() == s && link.GetUID().Equal(uid) {
-			G.Log.Debug("| Found self-signature for %s @%s", s,
+		if NewNormalizedUsername(link.GetUsername()).Eq(nun) && link.GetUID().Equal(uid) {
+			G.Log.Debug("| Found self-signature for %s @%s", string(nun),
 				link.ToDebugString())
 			return true
 		}
@@ -1123,100 +1168,171 @@ func (idt *IdentityTable) Len() int {
 	return len(idt.Order)
 }
 
-func (idt *IdentityTable) Identify(is IdentifyState, forceRemoteCheck bool, ui IdentifyUI) {
+type CheckCompletedListener interface {
+	CCLCheckCompleted(lcr *LinkCheckResult)
+}
+
+func (idt *IdentityTable) Identify(is IdentifyState, forceRemoteCheck bool, ui IdentifyUI, ccl CheckCompletedListener) {
 	var wg sync.WaitGroup
 	for _, lcr := range is.res.ProofChecks {
 		wg.Add(1)
 		go func(l *LinkCheckResult) {
 			defer wg.Done()
-			idt.identifyActiveProof(l, is, forceRemoteCheck, ui)
+			idt.identifyActiveProof(l, is, forceRemoteCheck, ui, ccl)
 		}(lcr)
 	}
-
-	// wait for all goroutines to complete before exiting
-	wg.Wait()
 
 	if acc := idt.ActiveCryptocurrency(); acc != nil {
 		acc.Display(ui)
 	}
+
+	// wait for all goroutines to complete before exiting
+	wg.Wait()
 }
 
 //=========================================================================
 
-func (idt *IdentityTable) identifyActiveProof(lcr *LinkCheckResult, is IdentifyState, forceRemoteCheck bool, ui IdentifyUI) {
+func (idt *IdentityTable) identifyActiveProof(lcr *LinkCheckResult, is IdentifyState, forceRemoteCheck bool, ui IdentifyUI, ccl CheckCompletedListener) {
 	idt.proofRemoteCheck(is.HasPreviousTrack(), forceRemoteCheck, lcr)
+	if ccl != nil {
+		ccl.CCLCheckCompleted(lcr)
+	}
 	lcr.link.DisplayCheck(ui, *lcr)
 }
 
 type LinkCheckResult struct {
-	hint              *SigHint
-	cached            *CheckResult
-	err               ProofError
-	diff              TrackDiff
-	remoteDiff        TrackDiff
-	link              RemoteProofChainLink
-	trackedProofState keybase1.ProofState
-	position          int
+	hint                 *SigHint
+	cached               *CheckResult
+	err                  ProofError
+	snoozedErr           ProofError
+	diff                 TrackDiff
+	remoteDiff           TrackDiff
+	link                 RemoteProofChainLink
+	trackedProofState    keybase1.ProofState
+	tmpTrackedProofState keybase1.ProofState
+	tmpTrackExpireTime   time.Time
+	position             int
+	torWarning           bool
 }
 
-func (l LinkCheckResult) GetDiff() TrackDiff      { return l.diff }
-func (l LinkCheckResult) GetError() error         { return l.err }
-func (l LinkCheckResult) GetHint() *SigHint       { return l.hint }
-func (l LinkCheckResult) GetCached() *CheckResult { return l.cached }
-func (l LinkCheckResult) GetPosition() int        { return l.position }
+func (l LinkCheckResult) GetDiff() TrackDiff            { return l.diff }
+func (l LinkCheckResult) GetError() error               { return l.err }
+func (l LinkCheckResult) GetHint() *SigHint             { return l.hint }
+func (l LinkCheckResult) GetCached() *CheckResult       { return l.cached }
+func (l LinkCheckResult) GetPosition() int              { return l.position }
+func (l LinkCheckResult) GetTorWarning() bool           { return l.torWarning }
+func (l LinkCheckResult) GetLink() RemoteProofChainLink { return l.link }
 
-func ComputeRemoteDiff(tracked, observed keybase1.ProofState) TrackDiff {
+// ComputeRemoteDiff takes as input three tracking results: the permanent track,
+// the local temporary track, and the one it observed remotely. It favors the
+// permanent track but will roll back to the temporary track if needs be.
+func (idt *IdentityTable) ComputeRemoteDiff(tracked, trackedTmp, observed keybase1.ProofState) (ret TrackDiff) {
+	idt.G().Log.Debug("+ ComputeRemoteDiff(%v,%v,%v)", tracked, trackedTmp, observed)
 	if observed == tracked {
-		return TrackDiffNone{}
+		ret = TrackDiffNone{}
+	} else if observed == trackedTmp {
+		ret = TrackDiffNoneViaTemporary{}
 	} else if observed == keybase1.ProofState_OK {
-		return TrackDiffRemoteWorking{tracked}
+		ret = TrackDiffRemoteWorking{tracked}
 	} else if tracked == keybase1.ProofState_OK {
-		return TrackDiffRemoteFail{observed}
+		ret = TrackDiffRemoteFail{observed}
+	} else {
+		ret = TrackDiffRemoteChanged{tracked, observed}
 	}
-	return TrackDiffRemoteChanged{tracked, observed}
+	idt.G().Log.Debug("- ComputeRemoteDiff(%v,%v,%v) -> (%+v,(%T))", tracked, trackedTmp, observed, ret, ret)
+	return ret
 }
 
 func (idt *IdentityTable) proofRemoteCheck(hasPreviousTrack, forceRemoteCheck bool, res *LinkCheckResult) {
 	p := res.link
 
-	G.Log.Debug("+ RemoteCheckProof %s", p.ToDebugString())
+	idt.G().Log.Debug("+ RemoteCheckProof %s", p.ToDebugString())
+	doCache := false
+	sid := p.GetSigID()
+
 	defer func() {
+
 		if hasPreviousTrack {
 			observedProofState := ProofErrorToState(res.err)
-			res.remoteDiff = ComputeRemoteDiff(res.trackedProofState, observedProofState)
+			res.remoteDiff = idt.ComputeRemoteDiff(res.trackedProofState, res.tmpTrackedProofState, observedProofState)
+
+			// If the remote diff only worked out because of the temporary track, then
+			// also update the local diff (i.e., the difference between what we tracked
+			// and what Keybase is saying) accordingly.
+			if _, ok := res.remoteDiff.(TrackDiffNoneViaTemporary); ok {
+				res.diff = res.remoteDiff
+			}
 		}
-		G.Log.Debug("- RemoteCheckProof %s", p.ToDebugString())
+
+		if doCache {
+			idt.G().Log.Debug("| Caching results under key=%s", sid)
+			if cacheErr := idt.G().ProofCache.Put(sid, res.err); cacheErr != nil {
+				idt.G().Log.Warning("proof cache put error: %s", cacheErr)
+			}
+		}
+
+		idt.G().Log.Debug("- RemoteCheckProof %s", p.ToDebugString())
 	}()
 
-	sid := p.GetSigID()
 	res.hint = idt.sigHints.Lookup(sid)
 	if res.hint == nil {
 		res.err = NewProofError(keybase1.ProofStatus_NO_HINT, "No server-given hint for sig=%s", sid)
 		return
 	}
 
-	if !forceRemoteCheck {
-		if res.cached = G.ProofCache.Get(sid); res.cached != nil {
-			res.err = res.cached.Status
-			return
-		}
-	}
-
 	var pc ProofChecker
-	pc, res.err = NewProofChecker(p)
+
+	// Call the Global context's version of what a proof checker is. We might want to stub it out
+	// for the purposes of testing.
+	pc, res.err = idt.G().NewProofChecker(p)
 
 	if res.err != nil {
 		return
 	}
 
-	res.err = pc.CheckHint(*res.hint)
-	if res.err == nil {
-		res.err = pc.CheckStatus(*res.hint)
+	if idt.G().Env.GetTorMode().Enabled() {
+		if e := pc.GetTorError(); e != nil {
+			res.torWarning = true
+		}
 	}
 
-	if err := G.ProofCache.Put(sid, res.err); err != nil {
-		G.Log.Warning("proof cache put error: %s", err)
+	if !forceRemoteCheck {
+		if res.cached = idt.G().ProofCache.Get(sid); res.cached != nil && res.cached.Freshness() == keybase1.CheckResultFreshness_FRESH {
+			res.err = res.cached.Status
+			return
+		}
 	}
+
+	// From this point on in the function, we'll be putting our results into
+	// cache (in the defer above).
+	doCache = true
+
+	if res.err = pc.CheckHint(*res.hint); res.err != nil {
+		idt.G().Log.Debug("| Hint failed with error: %s", res.err.Error())
+		return
+	}
+
+	res.err = pc.CheckStatus(*res.hint)
+
+	// If no error than all good
+	if res.err == nil {
+		return
+	}
+
+	// If the error was soft, and we had a cached successful result that wasn't rancid,
+	// then it's OK to stifle the error message for now.  We just have to be certain
+	// not to cache it.
+	if ProofErrorIsSoft(res.err) && res.cached != nil && res.cached.Status == nil &&
+		res.cached.Freshness() != keybase1.CheckResultFreshness_RANCID {
+		idt.G().Log.Debug("| Got soft error (%s) but returning success (last seen at %s)",
+			res.err.Error(), res.cached.Time)
+		res.snoozedErr = res.err
+		res.err = nil
+		doCache = false
+		return
+	}
+
+	idt.G().Log.Warning("| Check status failed with error: %s", res.err.Error())
 
 	return
 }

@@ -1,10 +1,13 @@
+// Copyright 2015 Keybase, Inc. All rights reserved. Use of
+// this source code is governed by the included BSD license.
+
 package libkb
 
 import (
 	"regexp"
 	"strings"
 
-	keybase1 "github.com/keybase/client/protocol/go"
+	keybase1 "github.com/keybase/client/go/protocol"
 	jsonw "github.com/keybase/go-jsonw"
 )
 
@@ -19,6 +22,8 @@ type GithubChecker struct {
 func NewGithubChecker(p RemoteProofChainLink) (*GithubChecker, ProofError) {
 	return &GithubChecker{p}, nil
 }
+
+func (rc *GithubChecker) GetTorError() ProofError { return nil }
 
 func (rc *GithubChecker) CheckHint(h SigHint) ProofError {
 	given := strings.ToLower(h.apiURL)
@@ -63,14 +68,21 @@ func (rc *GithubChecker) CheckStatus(h SigHint) ProofError {
 
 type GithubServiceType struct{ BaseServiceType }
 
-func (t GithubServiceType) AllStringKeys() []string     { return t.BaseAllStringKeys(t) }
-func (t GithubServiceType) PrimaryStringKeys() []string { return t.BasePrimaryStringKeys(t) }
+func (t GithubServiceType) AllStringKeys() []string { return t.BaseAllStringKeys(t) }
 
-func (t GithubServiceType) CheckUsername(s string) (err error) {
-	if !regexp.MustCompile(`^@?(?i:[a-z0-9][a-z0-9-]{0,38})$`).MatchString(s) {
-		err = BadUsernameError{s}
+var githubUsernameRegexp = regexp.MustCompile(`^(?i:[a-z0-9][a-z0-9-]{0,38})$`)
+
+func (t GithubServiceType) NormalizeUsername(s string) (string, error) {
+	if !githubUsernameRegexp.MatchString(s) {
+		return "", BadUsernameError{s}
 	}
-	return
+	return strings.ToLower(s), nil
+}
+
+func (t GithubServiceType) NormalizeRemoteName(s string) (ret string, err error) {
+	// Allow a leading '@'.
+	s = strings.TrimPrefix(s, "@")
+	return t.NormalizeUsername(s)
 }
 
 func (t GithubServiceType) ToChecker() Checker {
@@ -93,7 +105,7 @@ and name it <strong><color name="red">keybase.md</color></strong>`)
 func (t GithubServiceType) DisplayName(un string) string { return "Github" }
 func (t GithubServiceType) GetTypeName() string          { return "github" }
 
-func (t GithubServiceType) RecheckProofPosting(tryNumber int, status keybase1.ProofStatus) (warning *Markup, err error) {
+func (t GithubServiceType) RecheckProofPosting(tryNumber int, status keybase1.ProofStatus, _ string) (warning *Markup, err error) {
 	if status == keybase1.ProofStatus_PERMISSION_DENIED {
 		warning = FmtMarkup("Permission denied! Make sure your gist is <strong>public</strong>.")
 	} else {
@@ -112,7 +124,7 @@ func (t GithubServiceType) CheckProofText(text string, id keybase1.SigID, sig st
 func init() {
 	RegisterServiceType(GithubServiceType{})
 	RegisterSocialNetwork("github")
-	RegisterProofCheckHook("github",
+	RegisterMakeProofCheckerFunc("github",
 		func(l RemoteProofChainLink) (ProofChecker, ProofError) {
 			return NewGithubChecker(l)
 		})

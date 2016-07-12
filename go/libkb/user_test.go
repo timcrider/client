@@ -1,13 +1,16 @@
+// Copyright 2015 Keybase, Inc. All rights reserved. Use of
+// this source code is governed by the included BSD license.
+
 package libkb
 
 import (
 	"testing"
 
-	keybase1 "github.com/keybase/client/protocol/go"
+	keybase1 "github.com/keybase/client/go/protocol"
 )
 
 func TestExportUser(t *testing.T) {
-	tc := SetupTest(t, "export_user")
+	tc := SetupTest(t, "export_user", 1)
 	defer tc.Cleanup()
 	alice, err := LoadUser(NewLoadUserByNameArg(tc.G, "t_alice"))
 	if err != nil {

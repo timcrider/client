@@ -1,4 +1,4 @@
-COVERTEST=go test -covermode=count -coverprofile=/tmp/count.out
+GO15VENDOREXPERIMENT=1
 COVERWEB=go tool cover -html=/tmp/count.out
 
 fmt:
@@ -8,7 +8,9 @@ vet:
 	go vet ./...
 
 lint:
-	golint ./... | grep -v comment | grep -v KeysById | grep -v "error should be the last type" || echo "Lint-free!"
+	golint ./... | grep -v ^vendor | grep -v ^protocol | grep -v comment | grep -v KeysById | grep -v "error should be the last type" | grep -v stutters || echo "Lint-free!"
+	# Strict linting on saltpack
+	golint saltpack/...
 
 # to run splint, first do this:  go get stathat.com/c/splint
 splint:

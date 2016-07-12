@@ -1,10 +1,13 @@
+// Copyright 2015 Keybase, Inc. All rights reserved. Use of
+// this source code is governed by the included BSD license.
+
 package engine
 
 import (
 	"testing"
 
 	"github.com/keybase/client/go/libkb"
-	keybase1 "github.com/keybase/client/protocol/go"
+	keybase1 "github.com/keybase/client/go/protocol"
 )
 
 func runTrack(tc libkb.TestContext, fu *FakeUser, username string) (idUI *FakeIdentifyUI, them *libkb.User, err error) {
@@ -108,8 +111,8 @@ func TestTrack(t *testing.T) {
 	_, _, err := runTrack(tc, fu, "t_bob")
 	if err == nil {
 		t.Fatal("expected logout error; got no error")
-	} else if _, ok := err.(libkb.LoginRequiredError); !ok {
-		t.Fatalf("expected a LoginRequireError; got %s", err)
+	} else if _, ok := err.(libkb.DeviceRequiredError); !ok {
+		t.Fatalf("expected a DeviceRequireError; got %s", err)
 	}
 	fu.LoginOrBust(tc)
 	trackBob(tc, fu)
@@ -148,6 +151,20 @@ func TestTrackMultiple(t *testing.T) {
 	trackAlice(tc, fu)
 }
 
+func TestTrackNewUserWithPGP(t *testing.T) {
+	tc := SetupEngineTest(t, "track")
+	defer tc.Cleanup()
+	fu := createFakeUserWithPGPSibkey(tc)
+	Logout(tc)
+
+	tracker := CreateAndSignupFakeUser(tc, "track")
+	t.Logf("first track:")
+	runTrack(tc, tracker, fu.Username)
+
+	t.Logf("second track:")
+	runTrack(tc, tracker, fu.Username)
+}
+
 // see issue #578
 func TestTrackRetrack(t *testing.T) {
 	tc := SetupEngineTest(t, "track")
@@ -156,6 +173,7 @@ func TestTrackRetrack(t *testing.T) {
 
 	tc.G.LoginState().Account(func(a *libkb.Account) {
 		a.ClearStreamCache()
+		a.ClearCachedSecretKeys()
 	}, "clear stream cache")
 
 	idUI := &FakeIdentifyUI{}
@@ -184,8 +202,8 @@ func TestTrackRetrack(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if !secretUI.CalledGetSecret {
-		t.Errorf("expected get secret call")
+	if !secretUI.CalledGetPassphrase {
+		t.Errorf("expected get passphrase call")
 	}
 
 	fu.User, err = libkb.LoadMe(libkb.NewLoadUserPubOptionalArg(tc.G))
@@ -203,10 +221,11 @@ func TestTrackRetrack(t *testing.T) {
 	// clear out the passphrase cache
 	tc.G.LoginState().Account(func(a *libkb.Account) {
 		a.ClearStreamCache()
+		a.ClearCachedSecretKeys()
 	}, "clear stream cache")
 
 	// reset the flag
-	secretUI.CalledGetSecret = false
+	secretUI.CalledGetPassphrase = false
 
 	eng = NewTrackEngine(arg, tc.G)
 	err = RunEngine(eng, ctx)
@@ -214,7 +233,7 @@ func TestTrackRetrack(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if secretUI.CalledGetSecret {
+	if secretUI.CalledGetPassphrase {
 		t.Errorf("get secret called on retrack")
 	}
 
@@ -263,4 +282,74 @@ func TestTrackWithSecretStore(t *testing.T) {
 		trackAliceWithOptions(tc, fu, keybase1.TrackOptions{BypassConfirm: true}, secretUI)
 		untrackAlice(tc, fu)
 	})
+}
+
+// Test for Core-2196 identify/track race detection
+func TestIdentifyTrackRaceDetection(t *testing.T) {
+
+	user, dev1, dev2, cleanup := SetupTwoDevices(t, "track")
+	defer cleanup()
+
+	trackee := "t_tracy"
+
+	doID := func(tc libkb.TestContext, fui *FakeIdentifyUI) {
+
+		iarg := &keybase1.Identify2Arg{
+			UserAssertion: trackee,
+			// We need to block on identification so that the track token
+			// is delivered to the UI before we return. Otherwise, the
+			// following call to track might happen before the token
+			// is known.
+			AlwaysBlock: true,
+		}
+		eng := NewResolveThenIdentify2(tc.G, iarg)
+		ctx := Context{IdentifyUI: fui}
+		if err := RunEngine(eng, &ctx); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	track := func(tc libkb.TestContext, fui *FakeIdentifyUI) error {
+		arg := TrackTokenArg{
+			Token: fui.Token,
+			Options: keybase1.TrackOptions{
+				BypassConfirm: true,
+				ForceRetrack:  true,
+			},
+		}
+		ctx := &Context{
+			LogUI:    tc.G.UI.GetLogUI(),
+			SecretUI: user.NewSecretUI(),
+		}
+		eng := NewTrackToken(&arg, tc.G)
+		return RunEngine(eng, ctx)
+	}
+
+	trackSucceed := func(tc libkb.TestContext, fui *FakeIdentifyUI) {
+		if err := track(tc, fui); err != nil {
+			t.Fatal(err)
+		}
+		assertTracking(dev1, trackee)
+	}
+
+	trackFail := func(tc libkb.TestContext, fui *FakeIdentifyUI, firstTrack bool) {
+		if err := track(tc, fui); err == nil {
+			t.Fatal("wanted an error!")
+		} else if tse, ok := err.(libkb.TrackStaleError); !ok {
+			t.Fatal("wanted a track stale error")
+		} else if tse.FirstTrack != firstTrack {
+			t.Fatalf("first track disagreement: %v != %v", tse.FirstTrack, firstTrack)
+		}
+	}
+
+	for i := 0; i < 2; i++ {
+		fui1 := &FakeIdentifyUI{}
+		fui2 := &FakeIdentifyUI{}
+		doID(dev1, fui1)
+		doID(dev2, fui2)
+		trackSucceed(dev1, fui1)
+		trackFail(dev2, fui2, (i == 0))
+	}
+
+	runUntrack(dev1.G, user, trackee)
 }

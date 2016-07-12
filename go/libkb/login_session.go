@@ -1,3 +1,6 @@
+// Copyright 2015 Keybase, Inc. All rights reserved. Use of
+// this source code is governed by the included BSD license.
+
 package libkb
 
 import (
@@ -5,7 +8,12 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"time"
+
+	keybase1 "github.com/keybase/client/go/protocol"
 )
+
+const LoginSessionMemoryTimeout time.Duration = time.Minute * 5
 
 var ErrLoginSessionNotLoaded = errors.New("LoginSession not loaded")
 var ErrLoginSessionCleared = errors.New("LoginSession already cleared")
@@ -14,9 +22,10 @@ type LoginSession struct {
 	sessionFor      string // set by constructor
 	salt            []byte // retrieved from server, or set by WithSalt constructor
 	loginSessionB64 string
-	loginSession    []byte // decoded from above parameter
-	loaded          bool   // load state
-	cleared         bool   // clear state
+	loginSession    []byte    // decoded from above parameter
+	loaded          bool      // load state
+	cleared         bool      // clear state
+	createTime      time.Time // load time
 	Contextified
 }
 
@@ -31,9 +40,20 @@ func NewLoginSession(emailOrUsername string, g *GlobalContext) *LoginSession {
 func NewLoginSessionWithSalt(emailOrUsername string, salt []byte, g *GlobalContext) *LoginSession {
 	ls := NewLoginSession(emailOrUsername, g)
 	ls.salt = salt
+	// XXX are these right?  is this just so the salt can be retrieved?
 	ls.loaded = true
 	ls.cleared = true
 	return ls
+}
+
+func (s *LoginSession) Status() *keybase1.SessionStatus {
+	return &keybase1.SessionStatus{
+		SessionFor: s.sessionFor,
+		Loaded:     s.loaded,
+		Cleared:    s.cleared,
+		Expired:    !s.NotExpired(),
+		SaltOnly:   s.loaded && s.loginSession == nil && s.salt != nil,
+	}
 }
 
 func (s *LoginSession) Session() ([]byte, error) {
@@ -78,6 +98,18 @@ func (s *LoginSession) ExistsFor(emailOrUsername string) bool {
 	return true
 }
 
+func (s *LoginSession) NotExpired() bool {
+	now := s.G().Clock().Now()
+
+	if now.Sub(s.createTime) < LoginSessionMemoryTimeout {
+		return true
+	}
+	s.G().Log.Debug("login_session expired")
+	return false
+}
+
+// Clear removes the loginSession value from s. It does not
+// clear the salt. Unclear how this is useful.
 func (s *LoginSession) Clear() error {
 	if s == nil {
 		return nil
@@ -154,6 +186,8 @@ func (s *LoginSession) Load() error {
 	s.loginSessionB64 = b64
 	s.loginSession = ls
 	s.loaded = true
+	s.cleared = false
+	s.createTime = s.G().Clock().Now()
 
 	return nil
 }

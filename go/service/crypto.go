@@ -1,87 +1,80 @@
+// Copyright 2015 Keybase, Inc. All rights reserved. Use of
+// this source code is governed by the included BSD license.
+
 package service
 
 import (
+	"github.com/keybase/client/go/engine"
 	"github.com/keybase/client/go/libkb"
-	keybase1 "github.com/keybase/client/protocol/go"
-	"github.com/maxtaco/go-framed-msgpack-rpc/rpc2"
-	"golang.org/x/crypto/nacl/box"
+	keybase1 "github.com/keybase/client/go/protocol"
+	"golang.org/x/net/context"
 )
 
 type CryptoHandler struct {
-	*BaseHandler
-	// Defaults to CryptoHandler.getSecretKey(), but overrideable
-	// for testing.
-	getSecretKeyFn func(secretKeyType libkb.SecretKeyType, sessionID int, reason string) (libkb.GenericKey, error)
+	libkb.Contextified
 }
 
-func (c *CryptoHandler) getSecretKey(secretKeyType libkb.SecretKeyType, sessionID int, reason string) (libkb.GenericKey, error) {
-	me, err := libkb.LoadMe(libkb.NewLoadUserArg(G))
+func NewCryptoHandler(g *libkb.GlobalContext) *CryptoHandler {
+	return &CryptoHandler{
+		Contextified: libkb.NewContextified(g),
+	}
+}
+
+func (c *CryptoHandler) getDelegatedSecretUI(sessionID int) libkb.SecretUI {
+	// We should only ever be called in service mode, so UIRouter
+	// should be non-nil.
+
+	// sessionID 0 is special for desktop UI and should be used in this
+	// situation for one-off passphrase requests.
+	ui, err := c.G().UIRouter.GetSecretUI(0)
 	if err != nil {
-		return nil, err
+		c.G().Log.Debug("UIRouter.GetSecretUI() returned an error %v", err)
+		return nil
 	}
 
-	secretUI := c.getSecretUI(sessionID)
-	signingKey, _, err := G.Keyrings.GetSecretKeyWithPrompt(nil, libkb.SecretKeyArg{
-		Me:      me,
-		KeyType: secretKeyType,
-	}, secretUI, reason)
-	return signingKey, err
+	if ui == nil {
+		c.G().Log.Debug("UIRouter.GetSecretUI() returned nil")
+	}
+
+	c.G().Log.Debug("CryptoHandler: using delegated SecretUI")
+
+	return ui
 }
 
-func NewCryptoHandler(xp *rpc2.Transport) *CryptoHandler {
-	c := &CryptoHandler{BaseHandler: NewBaseHandler(xp)}
-
-	c.getSecretKeyFn = func(secretKeyType libkb.SecretKeyType, sessionID int, reason string) (libkb.GenericKey, error) {
-		return c.getSecretKey(secretKeyType, sessionID, reason)
-	}
-
-	return c
+// A libkb.SecretUI implementation that always returns a LoginRequiredError.
+type errorSecretUI struct {
+	reason string
 }
 
-func (c *CryptoHandler) SignED25519(arg keybase1.SignED25519Arg) (ret keybase1.ED25519SignatureInfo, err error) {
-	signingKey, err := c.getSecretKeyFn(libkb.DeviceSigningKeyType, arg.SessionID, arg.Reason)
-	if err != nil {
-		return
-	}
+var _ libkb.SecretUI = errorSecretUI{}
 
-	kp, ok := signingKey.(libkb.NaclSigningKeyPair)
-	if !ok || kp.Private == nil {
-		err = libkb.KeyCannotSignError{}
-		return
-	}
-
-	sig := *kp.Private.Sign(arg.Msg)
-	publicKey := kp.Public
-	ret = keybase1.ED25519SignatureInfo{
-		Sig:       keybase1.ED25519Signature(sig),
-		PublicKey: keybase1.ED25519PublicKey(publicKey),
-	}
-	return
+func (e errorSecretUI) GetPassphrase(keybase1.GUIEntryArg, *keybase1.SecretEntryArg) (keybase1.GetPassphraseRes, error) {
+	return keybase1.GetPassphraseRes{}, libkb.LoginRequiredError{Context: e.reason}
 }
 
-func (c *CryptoHandler) UnboxBytes32(arg keybase1.UnboxBytes32Arg) (bytes32 keybase1.Bytes32, err error) {
-	encryptionKey, err := c.getSecretKeyFn(libkb.DeviceEncryptionKeyType, arg.SessionID, arg.Reason)
-	if err != nil {
-		return
+func (c *CryptoHandler) getSecretUI(sessionID int, reason string) libkb.SecretUI {
+	secretUI := c.getDelegatedSecretUI(sessionID)
+	if secretUI != nil {
+		return secretUI
 	}
 
-	kp, ok := encryptionKey.(libkb.NaclDHKeyPair)
-	if !ok || kp.Private == nil {
-		err = libkb.KeyCannotDecryptError{}
-		return
-	}
+	// Return an errorSecretUI instead of triggering an error
+	// since we may not need a SecretUI at all.
+	return errorSecretUI{reason}
+}
 
-	decryptedData, ok := box.Open(nil, arg.EncryptedBytes32[:], (*[24]byte)(&arg.Nonce), (*[32]byte)(&arg.PeersPublicKey), (*[32]byte)(kp.Private))
-	if !ok {
-		err = libkb.DecryptionError{}
-		return
-	}
+func (c *CryptoHandler) SignED25519(_ context.Context, arg keybase1.SignED25519Arg) (keybase1.ED25519SignatureInfo, error) {
+	return engine.SignED25519(c.G(), c.getSecretUI(arg.SessionID, arg.Reason), arg)
+}
 
-	if len(decryptedData) != len(bytes32) {
-		err = libkb.DecryptionError{}
-		return
-	}
+func (c *CryptoHandler) SignToString(_ context.Context, arg keybase1.SignToStringArg) (string, error) {
+	return engine.SignToString(c.G(), c.getSecretUI(arg.SessionID, arg.Reason), arg)
+}
 
-	copy(bytes32[:], decryptedData)
-	return
+func (c *CryptoHandler) UnboxBytes32(_ context.Context, arg keybase1.UnboxBytes32Arg) (keybase1.Bytes32, error) {
+	return engine.UnboxBytes32(c.G(), c.getSecretUI(arg.SessionID, arg.Reason), arg)
+}
+
+func (c *CryptoHandler) UnboxBytes32Any(_ context.Context, arg keybase1.UnboxBytes32AnyArg) (keybase1.UnboxAnyRes, error) {
+	return engine.UnboxBytes32Any(c.G(), c.getSecretUI(arg.SessionID, arg.Reason), arg)
 }

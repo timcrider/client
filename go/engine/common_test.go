@@ -1,26 +1,44 @@
+// Copyright 2015 Keybase, Inc. All rights reserved. Use of
+// this source code is governed by the included BSD license.
+
 package engine
 
 import (
 	"crypto/rand"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"testing"
 
 	"github.com/keybase/client/go/libkb"
+	keybase1 "github.com/keybase/client/go/protocol"
+	insecureTriplesec "github.com/keybase/go-triplesec-insecure"
 )
 
-func SetupEngineTest(t *testing.T, name string) libkb.TestContext {
-	tc := libkb.SetupTest(t, name)
+func SetupEngineTest(tb testing.TB, name string) libkb.TestContext {
+	tc := libkb.SetupTest(tb, name, 2)
+	tc.G.NewTriplesec = func(passphrase []byte, salt []byte) (libkb.Triplesec, error) {
+		warner := func() { tc.G.Log.Warning("Installing insecure Triplesec with weak stretch parameters") }
+		isProduction := func() bool {
+			return tc.G.Env.GetRunMode() == libkb.ProductionRunMode
+		}
+		return insecureTriplesec.NewCipher(passphrase, salt, warner, isProduction)
+	}
 	return tc
 }
 
-var testInviteCode = "202020202020202020202020"
+func SetupEngineTestRealTriplesec(tb testing.TB, name string) libkb.TestContext {
+	tc := libkb.SetupTest(tb, name, 2)
+	tc.G.NewTriplesec = libkb.NewSecureTriplesec
+	return tc
+}
 
 type FakeUser struct {
-	Username   string
-	Email      string
-	Passphrase string
-	User       *libkb.User
+	Username      string
+	Email         string
+	Passphrase    string
+	User          *libkb.User
+	EncryptionKey libkb.GenericKey
 }
 
 func NewFakeUser(prefix string) (fu *FakeUser, err error) {
@@ -43,10 +61,10 @@ func (fu FakeUser) NormalizedUsername() libkb.NormalizedUsername {
 	return libkb.NewNormalizedUsername(fu.Username)
 }
 
-func NewFakeUserOrBust(t *testing.T, prefix string) (fu *FakeUser) {
+func NewFakeUserOrBust(tb testing.TB, prefix string) (fu *FakeUser) {
 	var err error
 	if fu, err = NewFakeUser(prefix); err != nil {
-		t.Fatal(err)
+		tb.Fatal(err)
 	}
 	return fu
 }
@@ -59,12 +77,13 @@ func MakeTestSignupEngineRunArg(fu *FakeUser) SignupEngineRunArg {
 	return SignupEngineRunArg{
 		Username:    fu.Username,
 		Email:       fu.Email,
-		InviteCode:  testInviteCode,
+		InviteCode:  libkb.TestInvitationCode,
 		Passphrase:  fu.Passphrase,
 		StoreSecret: false,
 		DeviceName:  defaultDeviceName,
 		SkipGPG:     true,
 		SkipMail:    true,
+		SkipPaper:   true,
 	}
 }
 
@@ -73,19 +92,30 @@ func SignupFakeUserWithArg(tc libkb.TestContext, fu *FakeUser, arg SignupEngineR
 		LogUI:    tc.G.UI.GetLogUI(),
 		GPGUI:    &gpgtestui{},
 		SecretUI: fu.NewSecretUI(),
-		LoginUI:  libkb.TestLoginUI{Username: fu.Username},
+		LoginUI:  &libkb.TestLoginUI{Username: fu.Username},
 	}
 	s := NewSignupEngine(&arg, tc.G)
 	err := RunEngine(s, ctx)
 	if err != nil {
 		tc.T.Fatal(err)
 	}
+	fu.EncryptionKey = s.encryptionKey
 	return s
 }
 
 func CreateAndSignupFakeUser(tc libkb.TestContext, prefix string) *FakeUser {
 	fu := NewFakeUserOrBust(tc.T, prefix)
+	tc.G.Log.Debug("New test user: %s / %s", fu.Username, fu.Email)
 	arg := MakeTestSignupEngineRunArg(fu)
+	_ = SignupFakeUserWithArg(tc, fu, arg)
+	return fu
+}
+
+func CreateAndSignupFakeUserPaper(tc libkb.TestContext, prefix string) *FakeUser {
+	fu := NewFakeUserOrBust(tc.T, prefix)
+	tc.G.Log.Debug("New test user: %s / %s", fu.Username, fu.Email)
+	arg := MakeTestSignupEngineRunArg(fu)
+	arg.SkipPaper = false
 	_ = SignupFakeUserWithArg(tc, fu, arg)
 	return fu
 }
@@ -101,7 +131,7 @@ func CreateAndSignupFakeUserSafe(g *libkb.GlobalContext, prefix string) (*FakeUs
 		LogUI:    g.UI.GetLogUI(),
 		GPGUI:    &gpgtestui{},
 		SecretUI: fu.NewSecretUI(),
-		LoginUI:  libkb.TestLoginUI{Username: fu.Username},
+		LoginUI:  &libkb.TestLoginUI{Username: fu.Username},
 	}
 	s := NewSignupEngine(&arg, g)
 	err = RunEngine(s, ctx)
@@ -122,13 +152,23 @@ func CreateAndSignupFakeUserGPG(tc libkb.TestContext, prefix string) *FakeUser {
 		LogUI:    tc.G.UI.GetLogUI(),
 		GPGUI:    &gpgtestui{},
 		SecretUI: fu.NewSecretUI(),
-		LoginUI:  libkb.TestLoginUI{Username: fu.Username},
+		LoginUI:  &libkb.TestLoginUI{Username: fu.Username},
 	}
 	s := NewSignupEngine(&arg, tc.G)
 	err := RunEngine(s, ctx)
 	if err != nil {
 		tc.T.Fatal(err)
 	}
+	return fu
+}
+
+func SignupFakeUserStoreSecret(tc libkb.TestContext, prefix string) *FakeUser {
+	fu := NewFakeUserOrBust(tc.T, prefix)
+	tc.G.Log.Debug("New test user: %s / %s", fu.Username, fu.Email)
+	arg := MakeTestSignupEngineRunArg(fu)
+	arg.SkipPaper = false
+	arg.StoreSecret = true
+	_ = SignupFakeUserWithArg(tc, fu, arg)
 	return fu
 }
 
@@ -140,7 +180,7 @@ func CreateAndSignupFakeUserCustomArg(tc libkb.TestContext, prefix string, fmod 
 		LogUI:    tc.G.UI.GetLogUI(),
 		GPGUI:    &gpgtestui{},
 		SecretUI: fu.NewSecretUI(),
-		LoginUI:  libkb.TestLoginUI{Username: fu.Username},
+		LoginUI:  &libkb.TestLoginUI{Username: fu.Username},
 	}
 	s := NewSignupEngine(&arg, tc.G)
 	err := RunEngine(s, ctx)
@@ -152,18 +192,19 @@ func CreateAndSignupFakeUserCustomArg(tc libkb.TestContext, prefix string, fmod 
 
 func (fu *FakeUser) LoginWithSecretUI(secui libkb.SecretUI, g *libkb.GlobalContext) error {
 	ctx := &Context{
+		ProvisionUI: newTestProvisionUI(),
 		LogUI:       g.UI.GetLogUI(),
-		LocksmithUI: &lockui{},
 		GPGUI:       &gpgtestui{},
 		SecretUI:    secui,
-		LoginUI:     &libkb.TestLoginUI{},
+		LoginUI:     &libkb.TestLoginUI{Username: fu.Username},
 	}
-	li := NewLoginWithPromptEngine(fu.Username, g)
+	li := NewLogin(g, libkb.DeviceTypeDesktop, fu.Username, keybase1.ClientType_CLI)
 	return RunEngine(li, ctx)
 }
 
 func (fu *FakeUser) Login(g *libkb.GlobalContext) error {
-	return fu.LoginWithSecretUI(fu.NewSecretUI(), g)
+	s := fu.NewSecretUI()
+	return fu.LoginWithSecretUI(s, g)
 }
 
 func (fu *FakeUser) LoginOrBust(tc libkb.TestContext) {
@@ -176,10 +217,29 @@ func (fu *FakeUser) NewSecretUI() *libkb.TestSecretUI {
 	return &libkb.TestSecretUI{Passphrase: fu.Passphrase}
 }
 
-func AssertLoggedIn(tc libkb.TestContext) error {
-	if err := checkLocalSession(tc); err != nil {
+func AssertProvisioned(tc libkb.TestContext) error {
+	prov, err := tc.G.LoginState().LoggedInProvisionedLoad()
+	if err != nil {
 		return err
 	}
+	if !prov {
+		return libkb.LoginRequiredError{}
+	}
+	return nil
+}
+
+func AssertNotProvisioned(tc libkb.TestContext) error {
+	prov, err := tc.G.LoginState().LoggedInProvisionedLoad()
+	if err != nil {
+		return err
+	}
+	if prov {
+		return errors.New("AssertNotProvisioned failed:  user is provisioned")
+	}
+	return nil
+}
+
+func AssertLoggedIn(tc libkb.TestContext) error {
 	if !LoggedIn(tc) {
 		return libkb.LoginRequiredError{}
 	}
@@ -187,28 +247,15 @@ func AssertLoggedIn(tc libkb.TestContext) error {
 }
 
 func AssertLoggedOut(tc libkb.TestContext) error {
-	if err := checkLocalSession(tc); err != nil {
-		return err
-	}
 	if LoggedIn(tc) {
 		return libkb.LogoutError{}
 	}
 	return nil
 }
 
-func checkLocalSession(tc libkb.TestContext) error {
-	var err error
-	aerr := tc.G.LoginState().LocalSession(func(s *libkb.Session) {
-		err = s.Check()
-	}, "engine test - checkLocalSession")
-	if aerr != nil {
-		return aerr
-	}
-	return err
-}
-
 func LoggedIn(tc libkb.TestContext) bool {
-	return tc.G.LoginState().LoggedIn()
+	lin, _ := tc.G.LoginState().LoggedInLoad()
+	return lin
 }
 
 func Logout(tc libkb.TestContext) {
@@ -226,11 +273,6 @@ func Logout(tc libkb.TestContext) {
 func testEngineWithSecretStore(
 	t *testing.T,
 	runEngine func(libkb.TestContext, *FakeUser, libkb.SecretUI)) {
-	// TODO: Get this working on non-OS X platforms (by mocking
-	// out the SecretStore).
-	if !libkb.HasSecretStore() {
-		t.Skip("Skipping test since there is no secret store")
-	}
 
 	tc := SetupEngineTest(t, "wss")
 	defer tc.Cleanup()
@@ -244,8 +286,8 @@ func testEngineWithSecretStore(
 	}
 	runEngine(tc, fu, &testSecretUI)
 
-	if !testSecretUI.CalledGetSecret {
-		t.Fatal("GetSecret() unexpectedly not called")
+	if !testSecretUI.CalledGetPassphrase {
+		t.Fatal("GetPassphrase() unexpectedly not called")
 	}
 
 	tc.ResetLoginState()
@@ -253,7 +295,93 @@ func testEngineWithSecretStore(
 	testSecretUI = libkb.TestSecretUI{}
 	runEngine(tc, fu, &testSecretUI)
 
-	if testSecretUI.CalledGetSecret {
-		t.Fatal("GetSecret() unexpectedly called")
+	if testSecretUI.CalledGetPassphrase {
+		t.Fatal("GetPassphrase() unexpectedly called")
 	}
+}
+
+func SetupTwoDevices(t *testing.T, nm string) (user *FakeUser, dev1 libkb.TestContext, dev2 libkb.TestContext, cleanup func()) {
+
+	if len(nm) > 5 {
+		t.Fatalf("Sorry, test name must be fewer than 6 chars (got %q)", nm)
+	}
+
+	// device X (provisioner) context:
+	dev1 = SetupEngineTest(t, nm)
+
+	// device Y (provisionee) context:
+	dev2 = SetupEngineTest(t, nm)
+
+	user = NewFakeUserOrBust(t, nm)
+	arg := MakeTestSignupEngineRunArg(user)
+	arg.SkipPaper = false
+	loginUI := &paperLoginUI{Username: user.Username}
+	ctx := &Context{
+		LogUI:    dev1.G.UI.GetLogUI(),
+		GPGUI:    &gpgtestui{},
+		SecretUI: user.NewSecretUI(),
+		LoginUI:  loginUI,
+	}
+	s := NewSignupEngine(&arg, dev1.G)
+	err := RunEngine(s, ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	assertNumDevicesAndKeys(dev1, user, 2, 4)
+
+	if len(loginUI.PaperPhrase) == 0 {
+		t.Fatal("login ui has no paper key phrase")
+	}
+
+	secUI := user.NewSecretUI()
+	secUI.Passphrase = loginUI.PaperPhrase
+	provUI := newTestProvisionUIPaper()
+	provLoginUI := &libkb.TestLoginUI{Username: user.Username}
+	ctx = &Context{
+		ProvisionUI: provUI,
+		LogUI:       dev2.G.UI.GetLogUI(),
+		SecretUI:    secUI,
+		LoginUI:     provLoginUI,
+		GPGUI:       &gpgtestui{},
+	}
+	eng := NewLogin(dev2.G, libkb.DeviceTypeDesktop, "", keybase1.ClientType_CLI)
+	if err := RunEngine(eng, ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	testUserHasDeviceKey(dev2)
+
+	assertNumDevicesAndKeys(dev2, user, 3, 6)
+
+	if err := AssertProvisioned(dev2); err != nil {
+		t.Fatal(err)
+	}
+
+	cleanup = func() {
+		dev1.Cleanup()
+		dev2.Cleanup()
+	}
+
+	return user, dev1, dev2, cleanup
+}
+
+func ResetAccount(tc libkb.TestContext, u *FakeUser) {
+	pps, err := tc.G.LoginState().GetPassphraseStreamWithPassphrase(u.Passphrase)
+	if err != nil {
+		tc.T.Fatal(err)
+	}
+	arg := libkb.APIArg{
+		Endpoint:    "nuke",
+		NeedSession: true,
+		Args: libkb.HTTPArgs{
+			"pwh": libkb.HexArg(pps.PWHash()),
+		},
+	}
+	res, err := tc.G.API.Post(arg)
+	if err != nil {
+		tc.T.Fatal(err)
+	}
+	tc.T.Logf("nuke api result: %+v", res)
+	Logout(tc)
 }

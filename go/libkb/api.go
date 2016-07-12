@@ -1,18 +1,23 @@
+// Copyright 2015 Keybase, Inc. All rights reserved. Use of
+// this source code is governed by the included BSD license.
+
 package libkb
 
 import (
 	"bytes"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
 	"io/ioutil"
 	"net/http"
 	"net/url"
-	"os/exec"
 	"runtime"
 	"strings"
 	"sync"
 	"time"
+
+	"golang.org/x/net/context"
 
 	"github.com/PuerkitoBio/goquery"
 	jsonw "github.com/keybase/go-jsonw"
@@ -20,6 +25,7 @@ import (
 
 // Shared code across Internal and External APIs
 type BaseAPIEngine struct {
+	Contextified
 	config    *ClientConfig
 	clientsMu sync.Mutex
 	clients   map[int]*Client
@@ -42,16 +48,39 @@ type Requester interface {
 	isExternal() bool
 }
 
+// NewInternalAPIEngine makes an API engine for internally querying the keybase
+// API server
+func NewInternalAPIEngine(g *GlobalContext) (*InternalAPIEngine, error) {
+	cliConfig, err := g.Env.GenClientConfigForInternalAPI()
+	if err != nil {
+		return nil, err
+	}
+
+	i := &InternalAPIEngine{
+		BaseAPIEngine{
+			config:       cliConfig,
+			clients:      make(map[int]*Client),
+			Contextified: NewContextified(g),
+		},
+	}
+	return i, nil
+}
+
 // Make a new InternalApiEngine and a new ExternalApiEngine, which share the
 // same network config (i.e., TOR and Proxy parameters)
-func NewAPIEngines(e *Env) (*InternalAPIEngine, *ExternalAPIEngine, error) {
-	config, err := e.GenClientConfig()
+func NewAPIEngines(g *GlobalContext) (*InternalAPIEngine, *ExternalAPIEngine, error) {
+	i, err := NewInternalAPIEngine(g)
 	if err != nil {
 		return nil, nil, err
 	}
-
-	i := &InternalAPIEngine{BaseAPIEngine{config: config, clients: make(map[int]*Client)}}
-	x := &ExternalAPIEngine{BaseAPIEngine{clients: make(map[int]*Client)}}
+	scraperConfig, err := g.Env.GenClientConfigForScrapers()
+	x := &ExternalAPIEngine{
+		BaseAPIEngine{
+			config:       scraperConfig,
+			clients:      make(map[int]*Client),
+			Contextified: NewContextified(g),
+		},
+	}
 	return i, x, nil
 }
 
@@ -96,8 +125,8 @@ func (api *BaseAPIEngine) getCli(cookied bool) (ret *Client) {
 	api.clientsMu.Lock()
 	client, found := api.clients[key]
 	if !found {
-		G.Log.Debug("| Cli wasn't found; remaking for cookied=%v", cookied)
-		client = NewClient(api.config, cookied)
+		api.G().Log.Debug("| Cli wasn't found; remaking for cookied=%v", cookied)
+		client = NewClient(api.G().Env, api.config, cookied)
 		api.clients[key] = client
 	}
 	api.clientsMu.Unlock()
@@ -107,19 +136,19 @@ func (api *BaseAPIEngine) getCli(cookied bool) (ret *Client) {
 func (api *BaseAPIEngine) PrepareGet(url url.URL, arg APIArg) (*http.Request, error) {
 	url.RawQuery = arg.getHTTPArgs().Encode()
 	ruri := url.String()
-	G.Log.Debug(fmt.Sprintf("+ API GET request to %s", ruri))
+	api.G().Log.Debug("+ API GET request to %s", ruri)
 	return http.NewRequest("GET", ruri, nil)
 }
 
 func (api *BaseAPIEngine) PreparePost(url url.URL, arg APIArg, sendJSON bool) (*http.Request, error) {
 	ruri := url.String()
-	G.Log.Debug(fmt.Sprintf("+ API Post request to %s", ruri))
+	api.G().Log.Debug(fmt.Sprintf("+ API Post request to %s", ruri))
 
 	var body io.Reader
 
 	if sendJSON {
 		if len(arg.getHTTPArgs()) > 0 {
-			panic("PreparePost:  sending JSON, but http args exist and they will be ignored.  Fix your APIArg.")
+			panic("PreparePost: sending JSON, but http args exist and they will be ignored. Fix your APIArg.")
 		}
 		jsonString, err := json.Marshal(arg.JSONPayload)
 		if err != nil {
@@ -152,10 +181,23 @@ func (api *BaseAPIEngine) PreparePost(url url.URL, arg APIArg, sendJSON bool) (*
 //============================================================================
 // Shared code
 //
-func doRequestShared(api Requester, arg APIArg, req *http.Request, wantJSONRes bool) (
-	resp *http.Response, jw *jsonw.Wrapper, err error) {
 
+// The returned response, if non-nil, should have
+// DiscardAndCloseBody() called on it.
+func doRequestShared(api Requester, arg APIArg, req *http.Request, wantJSONRes bool) (
+	_ *http.Response, jw *jsonw.Wrapper, err error) {
+	if !arg.G().Env.GetTorMode().UseSession() && arg.NeedSession {
+		err = TorSessionRequiredError{}
+		return
+	}
+
+	dbg := func(s string) {
+		arg.G().Log.Debug(fmt.Sprintf("| doRequestShared(%s) for %s", s, arg.Endpoint))
+	}
+
+	dbg("fixHeaders")
 	api.fixHeaders(arg, req)
+	dbg("getCli")
 	cli := api.getCli(arg.NeedSession)
 
 	// Actually send the request via Go's libraries
@@ -164,52 +206,140 @@ func doRequestShared(api Requester, arg APIArg, req *http.Request, wantJSONRes b
 		timerType = TimerXAPI
 	}
 
-	if G.Env.GetAPIDump() {
+	if arg.G().Env.GetAPIDump() {
 		jpStr, _ := json.MarshalIndent(arg.JSONPayload, "", "  ")
 		argStr, _ := json.MarshalIndent(arg.getHTTPArgs(), "", "  ")
-		G.Log.Debug(fmt.Sprintf("| full request: json:%s querystring:%s", jpStr, argStr))
+		arg.G().Log.Debug(fmt.Sprintf("| full request: json:%s querystring:%s", jpStr, argStr))
 	}
 
-	timer := G.Timers.Start(timerType)
-	resp, err = cli.cli.Do(req)
+	timer := arg.G().Timers.Start(timerType)
+	dbg("Do")
+
+	internalResp, err := doRetry(arg, cli, req)
+
+	dbg("Done")
+	defer func() {
+		if internalResp != nil && err != nil {
+			DiscardAndCloseBody(internalResp)
+		}
+	}()
+
 	timer.Report(req.Method + " " + arg.Endpoint)
 
 	if err != nil {
 		return nil, nil, APINetError{err: err}
 	}
-	G.Log.Debug(fmt.Sprintf("| Result is: %s", resp.Status))
+	arg.G().Log.Debug(fmt.Sprintf("| Result is: %s", internalResp.Status))
 
-	// Check for a code 200 or rather which codes were allowed in arg.HttpStatus
-	err = checkHTTPStatus(arg, resp)
+	// The server sends "client version out of date" messages through the API
+	// headers. If the client is *really* out of date, the request status will
+	// be a 400 error, but these headers will still be present. So we need to
+	// handle headers *before* we abort based on status below.
+	err = api.consumeHeaders(internalResp)
 	if err != nil {
 		return nil, nil, err
 	}
 
-	err = api.consumeHeaders(resp)
+	// Check for a code 200 or rather which codes were allowed in arg.HttpStatus
+	err = checkHTTPStatus(arg, internalResp)
 	if err != nil {
 		return nil, nil, err
 	}
 
 	if wantJSONRes {
-
-		decoder := json.NewDecoder(resp.Body)
+		decoder := json.NewDecoder(internalResp.Body)
 		var obj interface{}
 		decoder.UseNumber()
 		err = decoder.Decode(&obj)
-		resp.Body.Close()
 		if err != nil {
 			err = fmt.Errorf("Error in parsing JSON reply from server: %s", err)
 			return nil, nil, err
 		}
 
 		jw = jsonw.NewWrapper(obj)
-		if G.Env.GetAPIDump() {
+		if arg.G().Env.GetAPIDump() {
 			b, _ := json.MarshalIndent(obj, "", "  ")
-			G.Log.Debug(fmt.Sprintf("| full reply: %s", b))
+			arg.G().Log.Debug(fmt.Sprintf("| full reply: %s", b))
 		}
 	}
 
-	return resp, jw, nil
+	return internalResp, jw, nil
+}
+
+// doRetry will just call cli.cli.Do if arg.Timeout and arg.RetryCount aren't set.
+// If they are set, it will cancel requests that last longer than arg.Timeout and
+// retry them arg.RetryCount times.
+func doRetry(arg APIArg, cli *Client, req *http.Request) (*http.Response, error) {
+	if arg.InitialTimeout == 0 && arg.RetryCount == 0 {
+		return cli.cli.Do(req)
+	}
+
+	timeout := cli.cli.Timeout
+	if arg.InitialTimeout != 0 {
+		timeout = arg.InitialTimeout
+	}
+
+	retries := 1
+	if arg.RetryCount > 1 {
+		retries = arg.RetryCount
+	}
+
+	multiplier := 1.0
+	if arg.RetryMultiplier != 0.0 {
+		multiplier = arg.RetryMultiplier
+	}
+
+	var lastErr error
+	for i := 0; i < retries; i++ {
+		if i > 0 {
+			arg.G().Log.Debug("retry attempt %d of %d for %s", i, retries, arg.Endpoint)
+		}
+		resp, err := doTimeout(cli, req, timeout)
+		if err == nil {
+			return resp, nil
+		}
+		lastErr = err
+		timeout = time.Duration(float64(timeout) * multiplier)
+	}
+
+	return nil, fmt.Errorf("doRetry failed, attempts: %d, timeout %s, last err: %s", retries, timeout, lastErr)
+
+}
+
+// adapted from https://blog.golang.org/context httpDo func
+func doTimeout(cli *Client, req *http.Request, timeout time.Duration) (*http.Response, error) {
+	// TODO: could pass in a context from further up the chain
+	// and use that instead of context.Background()
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+
+	// new way to cancel requests
+	reqCancel := make(chan struct{})
+	req.Cancel = reqCancel
+
+	type response struct {
+		resp *http.Response
+		err  error
+	}
+	c := make(chan response, 1)
+	go func() {
+		var r response
+		r.resp, r.err = cli.cli.Do(req)
+		c <- r
+	}()
+
+	select {
+	case <-ctx.Done():
+		// request ctx timed out.  Cancel the request by closing req.Cancel channel:
+		close(reqCancel)
+		// wait for request to finish
+		<-c
+		return nil, ctx.Err()
+	case r := <-c:
+		// request successful
+		return r.resp, r.err
+	}
+
 }
 
 func checkHTTPStatus(arg APIArg, resp *http.Response) error {
@@ -267,7 +397,7 @@ func (a *InternalAPIEngine) sessionArgs(arg APIArg) (tok, csrf string) {
 	if arg.SessionR != nil {
 		return arg.SessionR.APIArgs()
 	}
-	arg.G().LoginState().LocalSession(func(s *Session) {
+	a.G().LoginState().LocalSession(func(s *Session) {
 		tok, csrf = s.APIArgs()
 	}, "sessionArgs")
 	return
@@ -278,87 +408,111 @@ func (a *InternalAPIEngine) isExternal() bool { return false }
 var lastUpgradeWarningMu sync.Mutex
 var lastUpgradeWarning *time.Time
 
-func (a *InternalAPIEngine) consumeHeaders(resp *http.Response) error {
-	u := resp.Header.Get("X-Keybase-Client-Upgrade-To")
-	if len(u) > 0 {
+func (a *InternalAPIEngine) consumeHeaders(resp *http.Response) (err error) {
+	upgradeTo := resp.Header.Get("X-Keybase-Client-Upgrade-To")
+	upgradeURI := resp.Header.Get("X-Keybase-Upgrade-URI")
+	customMessage := resp.Header.Get("X-Keybase-Upgrade-Message")
+	if customMessage != "" {
+		decoded, err := base64.StdEncoding.DecodeString(customMessage)
+		if err == nil {
+			customMessage = string(decoded)
+		} else {
+			// If base64-decode fails, just log the error and skip decoding.
+			a.G().Log.Errorf("Failed to decode X-Keybase-Upgrade-Message header: %s", err)
+		}
+	}
+	if len(upgradeTo) > 0 || len(customMessage) > 0 {
 		now := time.Now()
 		lastUpgradeWarningMu.Lock()
+		a.G().OutOfDateInfo.UpgradeTo = upgradeTo
+		a.G().OutOfDateInfo.UpgradeURI = upgradeURI
+		a.G().OutOfDateInfo.CustomMessage = customMessage
 		if lastUpgradeWarning == nil || now.Sub(*lastUpgradeWarning) > 3*time.Minute {
-			G.Log.Warning("Upgrade recommended to client version %s or above (you have v%s)",
-				u, Version)
-			platformSpecificUpgradeInstructions()
+			// Send the notification after we unlock
+			defer a.G().NotifyRouter.HandleClientOutOfDate(upgradeTo, upgradeURI, customMessage)
 			lastUpgradeWarning = &now
 		}
 		lastUpgradeWarningMu.Unlock()
 	}
-	return nil
-}
-
-func platformSpecificUpgradeInstructions() {
-	if runtime.GOOS != "linux" {
-		// TODO: Give brew instructions on OSX.
-		return
-	}
-
-	hasPackageManager := func(name string) bool {
-		// Not all package managers are in /usr/bin. (openSUSE for example puts
-		// Yast in /usr/sbin.) Better to just do the full check now than to get
-		// confused later.
-		_, err := exec.LookPath(name)
-		return err == nil
-	}
-	printInstructions := func(command string) {
-		G.Log.Warning("To upgrade, run the following command:")
-		G.Log.Warning("    " + command)
-	}
-
-	if hasPackageManager("apt-get") {
-		printInstructions("sudo apt-get update && sudo apt-get install keybase")
-	} else if hasPackageManager("dnf") {
-		printInstructions("sudo dnf upgrade keybase")
-	} else if hasPackageManager("yum") {
-		printInstructions("sudo yum upgrade keybase")
-	}
+	return
 }
 
 func (a *InternalAPIEngine) fixHeaders(arg APIArg, req *http.Request) {
 	if arg.NeedSession {
 		tok, csrf := a.sessionArgs(arg)
-		if len(tok) > 0 {
+		if len(tok) > 0 && a.G().Env.GetTorMode().UseSession() {
 			req.Header.Add("X-Keybase-Session", tok)
 		} else {
-			G.Log.Warning("fixHeaders:  need session, but session token empty")
+			a.G().Log.Warning("fixHeaders: need session, but session token empty")
 		}
-		if len(csrf) > 0 {
+		if len(csrf) > 0 && a.G().Env.GetTorMode().UseCSRF() {
 			req.Header.Add("X-CSRF-Token", csrf)
 		} else {
-			G.Log.Warning("fixHeaders:  need session, but session csrf empty")
+			a.G().Log.Warning("fixHeaders: need session, but session csrf empty")
 		}
 	}
-	req.Header.Set("User-Agent", UserAgent)
-	req.Header.Set("X-Keybase-Client", IdentifyAs)
+	if a.G().Env.GetTorMode().UseHeaders() {
+		req.Header.Set("User-Agent", UserAgent)
+		identifyAs := GoClientID + " v" + VersionString() + " " + runtime.GOOS
+		req.Header.Set("X-Keybase-Client", identifyAs)
+		if a.G().Env.GetDeviceID().Exists() {
+			req.Header.Set("X-Keybase-Device-ID", a.G().Env.GetDeviceID().String())
+		}
+		if i := a.G().Env.GetInstallID(); i.Exists() {
+			req.Header.Set("X-Keybase-Install-ID", i.String())
+		}
+	}
 }
 
-func checkAppStatus(arg APIArg, jw *jsonw.Wrapper) (string, error) {
-	var set []string
+func (a *InternalAPIEngine) checkAppStatusFromJSONWrapper(arg APIArg, jw *jsonw.Wrapper) (*AppStatus, error) {
+	var ast AppStatus
+	if err := jw.UnmarshalAgain(&ast); err != nil {
+		return nil, err
+	}
+	return &ast, a.checkAppStatus(arg, &ast)
+}
 
-	resName, err := jw.AtKey("name").GetString()
-	if err != nil {
-		err = fmt.Errorf("Cannot find status name in reply")
-		return "", err
+func (a *InternalAPIEngine) checkAppStatus(arg APIArg, ast *AppStatus) error {
+	set := arg.AppStatusCodes
+
+	if len(set) == 0 {
+		set = []int{SCOk}
 	}
 
-	if arg.AppStatus == nil || len(arg.AppStatus) == 0 {
-		set = []string{"OK"}
-	} else {
-		set = arg.AppStatus
-	}
 	for _, status := range set {
-		if resName == status {
-			return resName, nil
+		if ast.Code == status {
+			return nil
 		}
 	}
-	return "", NewAppStatusError(jw)
+
+	// check if there was a bad session error:
+	if err := a.checkSessionExpired(arg, ast); err != nil {
+		return err
+	}
+
+	return NewAppStatusError(ast)
+}
+
+func (a *InternalAPIEngine) checkSessionExpired(arg APIArg, ast *AppStatus) error {
+	if ast.Code != SCBadSession {
+		return nil
+	}
+	var loggedIn bool
+	if arg.SessionR != nil {
+		loggedIn = arg.SessionR.IsLoggedIn()
+	} else {
+		loggedIn = a.G().LoginState().LoggedIn()
+	}
+	if !loggedIn {
+		return nil
+	}
+	a.G().Log.Debug("local session -> is logged in, remote -> not logged in.  invalidating local session:")
+	if arg.SessionR != nil {
+		arg.SessionR.Invalidate()
+	} else {
+		a.G().LoginState().LocalSession(func(s *Session) { s.Invalidate() }, "api - checkSessionExpired")
+	}
+	return LoginRequiredError{Context: "your session has expired."}
 }
 
 func (a *InternalAPIEngine) Get(arg APIArg) (*APIRes, error) {
@@ -370,7 +524,9 @@ func (a *InternalAPIEngine) Get(arg APIArg) (*APIRes, error) {
 	return a.DoRequest(arg, req)
 }
 
-// GetResp performs a GET request and returns the http response.
+// GetResp performs a GET request and returns the http response.  The
+// returned response, if non-nil, should have DiscardAndCloseBody()
+// called on it.
 func (a *InternalAPIEngine) GetResp(arg APIArg) (*http.Response, error) {
 	url := a.getURL(arg)
 	req, err := a.PrepareGet(url, arg)
@@ -388,14 +544,17 @@ func (a *InternalAPIEngine) GetResp(arg APIArg) (*http.Response, error) {
 
 // GetDecode performs a GET request and decodes the response via
 // JSON into the value pointed to by v.
-func (a *InternalAPIEngine) GetDecode(arg APIArg, v interface{}) error {
+func (a *InternalAPIEngine) GetDecode(arg APIArg, v APIResponseWrapper) error {
 	resp, err := a.GetResp(arg)
 	if err != nil {
 		return err
 	}
+	defer DiscardAndCloseBody(resp)
 	dec := json.NewDecoder(resp.Body)
-	defer resp.Body.Close()
-	return dec.Decode(&v)
+	if err = dec.Decode(&v); err != nil {
+		return err
+	}
+	return a.checkAppStatus(arg, v.GetAppStatus())
 }
 
 func (a *InternalAPIEngine) Post(arg APIArg) (*APIRes, error) {
@@ -417,6 +576,8 @@ func (a *InternalAPIEngine) PostJSON(arg APIArg) (*APIRes, error) {
 }
 
 // PostResp performs a POST request and returns the http response.
+// The returned response, if non-nil, should have
+// DiscardAndCloseBody() called on it.
 func (a *InternalAPIEngine) PostResp(arg APIArg) (*http.Response, error) {
 	url := a.getURL(arg)
 	req, err := a.PreparePost(url, arg, false)
@@ -432,14 +593,29 @@ func (a *InternalAPIEngine) PostResp(arg APIArg) (*http.Response, error) {
 	return resp, nil
 }
 
-func (a *InternalAPIEngine) PostDecode(arg APIArg, v interface{}) error {
+func (a *InternalAPIEngine) PostDecode(arg APIArg, v APIResponseWrapper) error {
 	resp, err := a.PostResp(arg)
 	if err != nil {
 		return err
 	}
+	defer DiscardAndCloseBody(resp)
 	dec := json.NewDecoder(resp.Body)
-	defer resp.Body.Close()
-	return dec.Decode(&v)
+	if err = dec.Decode(&v); err != nil {
+		return err
+	}
+	return a.checkAppStatus(arg, v.GetAppStatus())
+}
+
+func (a *InternalAPIEngine) PostRaw(arg APIArg, ctype string, r io.Reader) (*APIRes, error) {
+	url := a.getURL(arg)
+	req, err := http.NewRequest("POST", url.String(), r)
+	if len(ctype) > 0 {
+		req.Header.Set("Content-Type", ctype)
+	}
+	if err != nil {
+		return nil, err
+	}
+	return a.DoRequest(arg, req)
 }
 
 func (a *InternalAPIEngine) DoRequest(arg APIArg, req *http.Request) (*APIRes, error) {
@@ -447,6 +623,7 @@ func (a *InternalAPIEngine) DoRequest(arg APIArg, req *http.Request) (*APIRes, e
 	if err != nil {
 		return nil, err
 	}
+	defer DiscardAndCloseBody(resp)
 
 	status, err := jw.AtKey("status").ToDictionary()
 	if err != nil {
@@ -456,13 +633,14 @@ func (a *InternalAPIEngine) DoRequest(arg APIArg, req *http.Request) (*APIRes, e
 
 	// Check for an "OK" or whichever app-level replies were allowed by
 	// http.AppStatus
-	appStatus, err := checkAppStatus(arg, status)
+	appStatus, err := a.checkAppStatusFromJSONWrapper(arg, status)
 	if err != nil {
+		a.G().Log.Debug("- API call %s error: %s", arg.Endpoint, err)
 		return nil, err
 	}
 
 	body := jw
-	G.Log.Debug(fmt.Sprintf("- successful API call"))
+	a.G().Log.Debug("- API call %s success", arg.Endpoint)
 	return &APIRes{status, body, resp.StatusCode, appStatus}, err
 }
 
@@ -479,7 +657,25 @@ const (
 )
 
 func (api *ExternalAPIEngine) fixHeaders(arg APIArg, req *http.Request) {
-	// noop for now
+	// TODO (here and in the internal API engine implementation): If we don't
+	// set the User-Agent, it will default to http.defaultUserAgent
+	// ("Go-http-client/1.1"). We should think about whether that's what we
+	// want in Tor mode. Clients that are actually using Tor will always be
+	// distinguishable from the rest, insofar as their originating IP will be a
+	// Tor exit node, but there may be other use cases where this matters more?
+	userAgent := UserAgent
+	// Awful hack to make reddit as happy as possible.
+	if isReddit(req) {
+		userAgent += " (by /u/oconnor663)"
+	}
+	if api.G().Env.GetTorMode().UseHeaders() {
+		req.Header.Set("User-Agent", userAgent)
+	}
+}
+
+func isReddit(req *http.Request) bool {
+	host := req.URL.Host
+	return host == "reddit.com" || strings.HasSuffix(host, ".reddit.com")
 }
 
 func (api *ExternalAPIEngine) consumeHeaders(resp *http.Response) error {
@@ -499,6 +695,7 @@ func (api *ExternalAPIEngine) DoRequest(
 	if err != nil {
 		return
 	}
+	defer DiscardAndCloseBody(resp)
 
 	switch restype {
 	case XAPIResJSON:
@@ -511,8 +708,7 @@ func (api *ExternalAPIEngine) DoRequest(
 		}
 	case XAPIResText:
 		var buf bytes.Buffer
-		_, err := buf.ReadFrom(resp.Body)
-		defer resp.Body.Close()
+		_, err = buf.ReadFrom(resp.Body)
 		if err == nil {
 			tr = &ExternalTextRes{resp.StatusCode, string(buf.Bytes())}
 		}

@@ -1,7 +1,12 @@
+// Copyright 2015 Keybase, Inc. All rights reserved. Use of
+// this source code is governed by the included BSD license.
+
 package libkb
 
 import (
-	keybase1 "github.com/keybase/client/protocol/go"
+	"time"
+
+	keybase1 "github.com/keybase/client/go/protocol"
 	jsonw "github.com/keybase/go-jsonw"
 )
 
@@ -32,6 +37,8 @@ type Device struct {
 	Description *string           `json:"name,omitempty"`
 	Status      *int              `json:"status,omitempty"`
 	Type        string            `json:"type"`
+	CTime       keybase1.Time     `json:"ctime"`
+	MTime       keybase1.Time     `json:"mtime"`
 }
 
 // NewPaperDevice creates a new paper backup key device
@@ -52,10 +59,12 @@ func NewPaperDevice(passphrasePrefix string) (*Device, error) {
 	return d, nil
 }
 
-func ParseDevice(jw *jsonw.Wrapper) (ret *Device, err error) {
+func ParseDevice(jw *jsonw.Wrapper, t time.Time) (ret *Device, err error) {
 	var obj Device
 	if err = jw.UnmarshalAgain(&obj); err == nil {
 		ret = &obj
+		ret.CTime = keybase1.ToTime(t)
+		ret.MTime = keybase1.ToTime(t)
 	}
 	return
 }
@@ -70,6 +79,12 @@ func (d *Device) Merge(d2 *Device) {
 	}
 	if d2.Status != nil {
 		d.Status = d2.Status
+	}
+	if d2.CTime.Before(d.CTime) && !d2.CTime.IsZero() {
+		d.CTime = d2.CTime
+	}
+	if d2.MTime.After(d.MTime) || d.MTime.IsZero() {
+		d.MTime = d2.MTime
 	}
 }
 
@@ -89,6 +104,10 @@ func (d *Device) Export(lt LinkType) (*jsonw.Wrapper, error) {
 		}
 	}
 
+	// These were being set to 0, so don't include them
+	dw.DeleteKey("mtime")
+	dw.DeleteKey("ctime")
+
 	return dw, nil
 }
 
@@ -96,9 +115,17 @@ func (d *Device) ProtExport() *keybase1.Device {
 	ex := &keybase1.Device{
 		Type:     d.Type,
 		DeviceID: d.ID,
+		CTime:    d.CTime,
+		MTime:    d.MTime,
 	}
 	if d.Description != nil {
 		ex.Name = *d.Description
+	}
+	if d.Status != nil {
+		ex.Status = *d.Status
+	}
+	if d.Kid.Exists() {
+		ex.VerifyKey = d.Kid
 	}
 	return ex
 }
@@ -108,4 +135,23 @@ func (d *Device) IsActive() bool {
 		return false
 	}
 	return *d.Status == DeviceStatusActive
+}
+
+func (d *Device) StatusString() string {
+	return DeviceStatusToString(d.Status)
+}
+
+func DeviceStatusToString(i *int) string {
+	if i == nil {
+		return "<nil>"
+	}
+	switch *i {
+	case DeviceStatusNone:
+		return "none"
+	case DeviceStatusActive:
+		return "active"
+	case DeviceStatusDefunct:
+		return "revoked"
+	}
+	return "unknown"
 }

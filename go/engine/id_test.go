@@ -1,3 +1,6 @@
+// Copyright 2015 Keybase, Inc. All rights reserved. Use of
+// this source code is governed by the included BSD license.
+
 package engine
 
 import (
@@ -6,12 +9,12 @@ import (
 	"testing"
 
 	"github.com/keybase/client/go/libkb"
-	keybase1 "github.com/keybase/client/protocol/go"
+	keybase1 "github.com/keybase/client/go/protocol"
 )
 
 func runIdentify(tc *libkb.TestContext, username string) (idUI *FakeIdentifyUI, res *IDRes, err error) {
 	idUI = &FakeIdentifyUI{}
-	arg := IDEngineArg{
+	arg := keybase1.IdentifyArg{
 		UserAssertion: username,
 	}
 	ctx := Context{
@@ -24,15 +27,15 @@ func runIdentify(tc *libkb.TestContext, username string) (idUI *FakeIdentifyUI, 
 	return
 }
 
-func checkAliceProofs(t *testing.T, idUI *FakeIdentifyUI, user *libkb.User) {
-	checkKeyedProfile(t, idUI, user, "alice", true, map[string]string{
+func checkAliceProofs(tb testing.TB, idUI *FakeIdentifyUI, user *libkb.User) {
+	checkKeyedProfile(tb, idUI, user, "alice", true, map[string]string{
 		"github":  "kbtester2",
 		"twitter": "tacovontaco",
 	})
 }
 
-func checkBobProofs(t *testing.T, idUI *FakeIdentifyUI, user *libkb.User) {
-	checkKeyedProfile(t, idUI, user, "bob", true, map[string]string{
+func checkBobProofs(tb testing.TB, idUI *FakeIdentifyUI, user *libkb.User) {
+	checkKeyedProfile(tb, idUI, user, "bob", true, map[string]string{
 		"github":  "kbtester1",
 		"twitter": "kbtester1",
 	})
@@ -49,13 +52,13 @@ func checkDougProofs(t *testing.T, idUI *FakeIdentifyUI, user *libkb.User) {
 	checkKeyedProfile(t, idUI, user, "doug", false, nil)
 }
 
-func checkKeyedProfile(t *testing.T, idUI *FakeIdentifyUI, them *libkb.User, name string, hasImg bool, expectedProofs map[string]string) {
+func checkKeyedProfile(tb testing.TB, idUI *FakeIdentifyUI, them *libkb.User, name string, hasImg bool, expectedProofs map[string]string) {
 	if exported := them.Export(); !reflect.DeepEqual(idUI.User, exported) {
-		t.Fatal("LaunchNetworkChecks User not equal to result user.", idUI.User, exported)
+		tb.Fatal("LaunchNetworkChecks User not equal to result user.", idUI.User, exported)
 	}
 
 	if !reflect.DeepEqual(expectedProofs, idUI.Proofs) {
-		t.Fatal("Wrong proofs.", expectedProofs, idUI.Proofs)
+		tb.Fatal("Wrong proofs.", expectedProofs, idUI.Proofs)
 	}
 }
 
@@ -70,13 +73,6 @@ func checkDisplayKeys(t *testing.T, idUI *FakeIdentifyUI, callCount, keyCount in
 			t.Logf("key: %+v, %+v", k, v)
 		}
 	}
-
-	// this doesn't work anymore:
-	//	for k := range idUI.Keys {
-	//		if k.PGPFingerprint == nil {
-	//			t.Errorf("key %v: not pgp.  only pgp keys should be displayed.", k)
-	//		}
-	//	}
 }
 
 func TestIdAlice(t *testing.T) {
@@ -166,11 +162,17 @@ func TestIdPGPNotEldest(t *testing.T) {
 
 type FakeIdentifyUI struct {
 	Proofs          map[string]string
+	ProofResults    map[string]keybase1.LinkCheckResult
 	User            *keybase1.User
 	Confirmed       bool
 	Keys            map[libkb.PGPFingerprint]*keybase1.TrackDiff
 	DisplayKeyCalls int
 	Outcome         *keybase1.IdentifyOutcome
+	StartCount      int
+	Token           keybase1.TrackToken
+	BrokenTracking  bool
+	DisplayTLFArg   keybase1.DisplayTLFCreateWithInviteArg
+	DisplayTLFCount int
 	sync.Mutex
 }
 
@@ -181,6 +183,14 @@ func (ui *FakeIdentifyUI) FinishWebProofCheck(proof keybase1.RemoteProof, result
 		ui.Proofs = make(map[string]string)
 	}
 	ui.Proofs[proof.Key] = proof.Value
+
+	if ui.ProofResults == nil {
+		ui.ProofResults = make(map[string]keybase1.LinkCheckResult)
+	}
+	ui.ProofResults[proof.Key] = result
+	if result.BreaksTracking {
+		ui.BrokenTracking = true
+	}
 }
 
 func (ui *FakeIdentifyUI) FinishSocialProofCheck(proof keybase1.RemoteProof, result keybase1.LinkCheckResult) {
@@ -190,12 +200,21 @@ func (ui *FakeIdentifyUI) FinishSocialProofCheck(proof keybase1.RemoteProof, res
 		ui.Proofs = make(map[string]string)
 	}
 	ui.Proofs[proof.Key] = proof.Value
+	if ui.ProofResults == nil {
+		ui.ProofResults = make(map[string]keybase1.LinkCheckResult)
+	}
+	ui.ProofResults[proof.Key] = result
+	if result.BreaksTracking {
+		ui.BrokenTracking = true
+	}
 }
-func (ui *FakeIdentifyUI) Confirm(outcome *keybase1.IdentifyOutcome) (confirmed bool, err error) {
+
+func (ui *FakeIdentifyUI) Confirm(outcome *keybase1.IdentifyOutcome) (result keybase1.ConfirmResult, err error) {
 	ui.Lock()
 	defer ui.Unlock()
 	ui.Outcome = outcome
-	confirmed = outcome.TrackOptions.BypassConfirm
+	result.IdentityConfirmed = outcome.TrackOptions.BypassConfirm
+	result.RemoteConfirmed = outcome.TrackOptions.BypassConfirm && !outcome.TrackOptions.ExpiringLocal
 	return
 }
 func (ui *FakeIdentifyUI) DisplayCryptocurrency(keybase1.Cryptocurrency) {
@@ -214,9 +233,13 @@ func (ui *FakeIdentifyUI) DisplayKey(ik keybase1.IdentifyKey) {
 }
 func (ui *FakeIdentifyUI) ReportLastTrack(*keybase1.TrackSummary) {
 }
-func (ui *FakeIdentifyUI) Start(username string) {
+func (ui *FakeIdentifyUI) Start(username string, _ keybase1.IdentifyReason) {
+	ui.Lock()
+	defer ui.Unlock()
+	ui.StartCount++
 }
-func (ui *FakeIdentifyUI) Finish() {}
+func (ui *FakeIdentifyUI) Finish()                                    {}
+func (ui *FakeIdentifyUI) Dismiss(_ string, _ keybase1.DismissReason) {}
 func (ui *FakeIdentifyUI) LaunchNetworkChecks(id *keybase1.Identity, user *keybase1.User) {
 	ui.Lock()
 	defer ui.Unlock()
@@ -225,5 +248,16 @@ func (ui *FakeIdentifyUI) LaunchNetworkChecks(id *keybase1.Identity, user *keyba
 func (ui *FakeIdentifyUI) DisplayTrackStatement(string) (err error) {
 	return
 }
+func (ui *FakeIdentifyUI) DisplayUserCard(keybase1.UserCard) {
+}
+func (ui *FakeIdentifyUI) ReportTrackToken(tok keybase1.TrackToken) error {
+	ui.Token = tok
+	return nil
+}
 func (ui *FakeIdentifyUI) SetStrict(b bool) {
+}
+func (ui *FakeIdentifyUI) DisplayTLFCreateWithInvite(arg keybase1.DisplayTLFCreateWithInviteArg) error {
+	ui.DisplayTLFCount++
+	ui.DisplayTLFArg = arg
+	return nil
 }

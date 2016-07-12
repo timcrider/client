@@ -1,10 +1,13 @@
+// Copyright 2015 Keybase, Inc. All rights reserved. Use of
+// this source code is governed by the included BSD license.
+
 package libkb
 
 import (
 	"io"
 	"strings"
 
-	"golang.org/x/crypto/openpgp"
+	"github.com/keybase/go-crypto/openpgp"
 )
 
 func PGPEncrypt(source io.Reader, sink io.WriteCloser, signer *PGPKeyBundle, recipients []*PGPKeyBundle) error {

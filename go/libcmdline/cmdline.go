@@ -1,9 +1,14 @@
+// Copyright 2015 Keybase, Inc. All rights reserved. Use of
+// this source code is governed by the included BSD license.
+
 package libcmdline
 
 import (
+	"fmt"
 	"io"
 	"regexp"
 	"strings"
+	"time"
 
 	"github.com/keybase/cli"
 	"github.com/keybase/client/go/libkb"
@@ -16,6 +21,7 @@ type Command interface {
 }
 
 type ForkCmd int
+type LogForward int
 
 const (
 	NormalFork ForkCmd = iota
@@ -23,30 +29,32 @@ const (
 	ForceFork
 )
 
+const (
+	LogForwardNormal LogForward = iota
+	LogForwardNone
+)
+
 type CommandLine struct {
 	app          *cli.App
 	ctx          *cli.Context
 	cmd          Command
-	name         string  // the name of the chosen command
-	service      bool    // The server is a special command
-	fork         ForkCmd // If the command is to stop (then don't start the server)
-	noStandalone bool    // On if this command can't run in standalone mode
+	name         string     // the name of the chosen command
+	service      bool       // The server is a special command
+	fork         ForkCmd    // If the command is to stop (then don't start the server)
+	noStandalone bool       // On if this command can't run in standalone mode
+	logForward   LogForward // What do to about log forwarding
 	defaultCmd   string
 }
 
-func (p CommandLine) IsService() bool       { return p.service }
-func (p *CommandLine) SetService()          { p.service = true }
-func (p CommandLine) GetForkCmd() ForkCmd   { return p.fork }
-func (p *CommandLine) SetForkCmd(v ForkCmd) { p.fork = v }
-func (p *CommandLine) SetNoStandalone()     { p.noStandalone = true }
-func (p CommandLine) IsNoStandalone() bool  { return p.noStandalone }
+func (p CommandLine) IsService() bool             { return p.service }
+func (p *CommandLine) SetService()                { p.service = true }
+func (p CommandLine) GetForkCmd() ForkCmd         { return p.fork }
+func (p *CommandLine) SetForkCmd(v ForkCmd)       { p.fork = v }
+func (p *CommandLine) SetNoStandalone()           { p.noStandalone = true }
+func (p CommandLine) IsNoStandalone() bool        { return p.noStandalone }
+func (p *CommandLine) SetLogForward(f LogForward) { p.logForward = f }
+func (p *CommandLine) GetLogForward() LogForward  { return p.logForward }
 
-func (p CommandLine) GetSplitLogOutput() (bool, bool) {
-	return p.GetBool("split-log-output", true)
-}
-func (p CommandLine) GetLogFile() string {
-	return p.GetGString("log-file")
-}
 func (p CommandLine) GetNoAutoFork() (bool, bool) {
 	return p.GetBool("no-auto-fork", true)
 }
@@ -62,6 +70,9 @@ func (p CommandLine) GetServerURI() string {
 func (p CommandLine) GetConfigFilename() string {
 	return p.GetGString("config-file")
 }
+func (p CommandLine) GetUpdaterConfigFilename() string {
+	return p.GetGString("updater-config-file")
+}
 func (p CommandLine) GetSessionFilename() string {
 	return p.GetGString("session-file")
 }
@@ -69,7 +80,16 @@ func (p CommandLine) GetDbFilename() string {
 	return p.GetGString("db")
 }
 func (p CommandLine) GetDebug() (bool, bool) {
+	// --no-debug suppresses --debug. Note that although we don't define a
+	// separate GetNoDebug() accessor, fork_server.go still looks for
+	// --no-debug by name, to pass it along to an autoforked daemon.
+	if noDebug, _ := p.GetBool("no-debug", true); noDebug {
+		return false /* val */, true /* isSet */
+	}
 	return p.GetBool("debug", true)
+}
+func (p CommandLine) GetVDebugSetting() string {
+	return p.GetGString("vdebug")
 }
 func (p CommandLine) GetPGPFingerprint() *libkb.PGPFingerprint {
 	return libkb.PGPFingerprintFromHexNoError(p.GetGString("fingerprint"))
@@ -77,20 +97,37 @@ func (p CommandLine) GetPGPFingerprint() *libkb.PGPFingerprint {
 func (p CommandLine) GetProxy() string {
 	return p.GetGString("proxy")
 }
-func (p CommandLine) GetUsername() libkb.NormalizedUsername {
-	return libkb.NewNormalizedUsername(p.GetGString("username"))
+func (p CommandLine) GetLogFile() string {
+	return p.GetGString("log-file")
 }
 func (p CommandLine) GetLogFormat() string {
 	return p.GetGString("log-format")
-}
-func (p CommandLine) GetLabel() string {
-	return p.GetGString("label")
 }
 func (p CommandLine) GetGpgHome() string {
 	return p.GetGString("gpg-home")
 }
 func (p CommandLine) GetAPIDump() (bool, bool) {
 	return p.GetBool("api-dump-unsafe", true)
+}
+func (p CommandLine) GetGregorSaveInterval() (time.Duration, bool) {
+	ret, err := p.GetGDuration("push-save-interval")
+	if err != nil {
+		return 0, false
+	}
+	return ret, true
+}
+func (p CommandLine) GetGregorDisabled() (bool, bool) {
+	return p.GetBool("push-disabled", true)
+}
+func (p CommandLine) GetGregorURI() string {
+	return p.GetGString("push-server-uri")
+}
+func (p CommandLine) GetGregorPingInterval() (time.Duration, bool) {
+	ret, err := p.GetGDuration("push-ping-interval")
+	if err != nil {
+		return 0, false
+	}
+	return ret, true
 }
 func (p CommandLine) GetRunMode() (libkb.RunMode, error) {
 	return libkb.StringToRunMode(p.GetGString("run-mode"))
@@ -101,8 +138,14 @@ func (p CommandLine) GetPinentry() string {
 func (p CommandLine) GetGString(s string) string {
 	return p.ctx.GlobalString(s)
 }
+func (p CommandLine) GetString(s string) string {
+	return p.ctx.String(s)
+}
 func (p CommandLine) GetGInt(s string) int {
 	return p.ctx.GlobalInt(s)
+}
+func (p CommandLine) GetGDuration(s string) (time.Duration, error) {
+	return time.ParseDuration(p.GetGString(s))
 }
 func (p CommandLine) GetGpg() string {
 	return p.GetGString("gpg")
@@ -116,6 +159,20 @@ func (p CommandLine) GetSocketFile() string {
 func (p CommandLine) GetPidFile() string {
 	return p.GetGString("pid-file")
 }
+func (p CommandLine) GetScraperTimeout() (time.Duration, bool) {
+	ret, err := p.GetGDuration("scraper-timeout")
+	if err != nil {
+		return 0, false
+	}
+	return ret, true
+}
+func (p CommandLine) GetAPITimeout() (time.Duration, bool) {
+	ret, err := p.GetGDuration("api-timeout")
+	if err != nil {
+		return 0, false
+	}
+	return ret, true
+}
 func (p CommandLine) GetGpgOptions() []string {
 	var ret []string
 	s := p.GetGString("gpg-options")
@@ -125,20 +182,30 @@ func (p CommandLine) GetGpgOptions() []string {
 	return ret
 }
 
+func (p CommandLine) getKIDs(name string) []string {
+	s := p.GetGString(name)
+	if len(s) == 0 {
+		return nil
+	}
+	return strings.Split(s, ":")
+}
+
 func (p CommandLine) GetMerkleKIDs() []string {
-	s := p.GetGString("merkle-kids")
-	if len(s) != 0 {
-		return strings.Split(s, ":")
-	}
-	return nil
+	return p.getKIDs("merkle-kids")
 }
-func (p CommandLine) GetUserCacheSize() (int, bool) {
-	ret := p.GetGInt("user-cache-size")
-	if ret != 0 {
-		return ret, true
-	}
-	return 0, false
+
+func (p CommandLine) GetCodeSigningKIDs() []string {
+	return p.getKIDs("code-signing-kids")
 }
+
+func (p CommandLine) GetUserCacheMaxAge() (time.Duration, bool) {
+	ret, err := p.GetGDuration("user-cache-maxage")
+	if err != nil {
+		return 0, false
+	}
+	return ret, true
+}
+
 func (p CommandLine) GetProofCacheSize() (int, bool) {
 	ret := p.GetGInt("proof-cache-size")
 	if ret != 0 {
@@ -146,11 +213,21 @@ func (p CommandLine) GetProofCacheSize() (int, bool) {
 	}
 	return 0, false
 }
-func (p CommandLine) GetDaemonPort() (ret int, set bool) {
-	if ret = p.GetGInt("daemon-port"); ret != 0 {
-		set = true
+
+func (p CommandLine) GetLinkCacheSize() (int, bool) {
+	ret := p.GetGInt("link-cache-size")
+	if ret != 0 {
+		return ret, true
 	}
-	return
+	return 0, false
+}
+
+func (p CommandLine) GetLocalTrackMaxAge() (time.Duration, bool) {
+	ret, err := p.GetGDuration("local-track-maxage")
+	if err != nil {
+		return 0, false
+	}
+	return ret, true
 }
 
 func (p CommandLine) GetStandalone() (bool, bool) {
@@ -163,6 +240,28 @@ func (p CommandLine) GetLocalRPCDebug() string {
 
 func (p CommandLine) GetTimers() string {
 	return p.GetGString("timers")
+}
+
+func (p CommandLine) GetTorMode() (ret libkb.TorMode, err error) {
+	if s := p.GetGString("tor-mode"); s != "" {
+		ret, err = libkb.StringToTorMode(s)
+	}
+	return ret, err
+}
+
+func (p CommandLine) GetTorHiddenAddress() string {
+	return p.GetGString("tor-hidden-address")
+}
+func (p CommandLine) GetTorProxy() string {
+	return p.GetGString("tor-proxy")
+}
+
+func (p CommandLine) GetMountDir() string {
+	return p.GetGString("mountdir")
+}
+
+func (p CommandLine) GetAppStartMode() string {
+	return p.GetGString("app-start-mode")
 }
 
 func (p CommandLine) GetBool(s string, glbl bool) (bool, bool) {
@@ -215,93 +314,41 @@ func NewCommandLine(addHelp bool, extraFlags []cli.Flag) *CommandLine {
 func (p *CommandLine) PopulateApp(addHelp bool, extraFlags []cli.Flag) {
 	app := p.app
 	app.Name = "keybase"
-	app.Version = libkb.Version
+	app.Version = libkb.VersionString()
 	app.Usage = "Keybase command line client."
 
 	app.Flags = []cli.Flag{
-		cli.StringFlag{
-			Name:  "home, H",
-			Usage: "Specify an (alternate) home directory.",
+		cli.BoolFlag{
+			Name:  "api-dump-unsafe",
+			Usage: "Dump API call internals (may leak secrets).",
 		},
 		cli.StringFlag{
-			Name:  "server, s",
-			Usage: "Specify server API.",
-		},
-		cli.StringFlag{
-			Name:  "config-file, c",
-			Usage: "Specify an (alternate) master config file.",
-		},
-		cli.StringFlag{
-			Name:  "session-file",
-			Usage: "Specify an alternate session data file.",
-		},
-		cli.StringFlag{
-			Name:  "db",
-			Usage: "Specify an alternate local DB location.",
+			Name:  "api-timeout",
+			Usage: "set the HTTP timeout for API calls to the keybase API server",
 		},
 		cli.StringFlag{
 			Name:  "api-uri-path-prefix",
 			Usage: "Specify an alternate API URI path prefix.",
 		},
 		cli.StringFlag{
-			Name:  "username, u",
-			Usage: "Specify Keybase username of the current user.",
+			Name:  "app-start-mode",
+			Usage: "Specify 'service' to auto-start UI app, or anything else to disable",
 		},
 		cli.StringFlag{
-			Name:  "pinentry",
-			Usage: "Specify a path to find a pinentry program.",
+			Name:  "code-signing-kids",
+			Usage: "Set of code signing key IDs (colon-separated).",
 		},
 		cli.StringFlag{
-			Name:  "secret-keyring",
-			Usage: "Location of the Keybase secret-keyring (P3SKB-encoded).",
+			Name:  "config-file, c",
+			Usage: "Specify an (alternate) master config file.",
 		},
 		cli.StringFlag{
-			Name:  "socket-file",
-			Usage: "Location of the keybased socket-file.",
-		},
-		cli.StringFlag{
-			Name:  "pid-file",
-			Usage: "Location of the keybased pid-file (to ensure only one running daemon).",
-		},
-		cli.StringFlag{
-			Name:  "proxy",
-			Usage: "Specify an HTTP(s) proxy to ship all Web requests over.",
+			Name:  "db",
+			Usage: "Specify an alternate local DB location.",
 		},
 		cli.BoolFlag{
 			Name:  "debug, d",
 			Usage: "Enable debugging mode.",
-		},
-		cli.StringFlag{
-			Name:  "run-mode",
-			Usage: "Run mode (devel, staging, prod).", // These are defined in libkb/constants.go
-		},
-		cli.StringFlag{
-			Name:  "log-format",
-			Usage: "Log format (default, plain, file, fancy).",
-		},
-		cli.StringFlag{
-			Name:  "label",
-			Usage: "Specifying a label can help identify services.",
-		},
-		cli.StringFlag{
-			Name:  "pgpdir, gpgdir",
-			Usage: "Specify a PGP directory (default is ~/.gnupg).",
-		},
-		cli.BoolFlag{
-			Name:  "api-dump-unsafe",
-			Usage: "Dump API call internals (may leak secrets).",
-		},
-		cli.StringFlag{
-			Name:  "merkle-key-fingerprints",
-			Usage: "Set of admissable Merkle Tree fingerprints (colon-separated).",
-		},
-		cli.IntFlag{
-			Name:  "user-cache-size",
-			Usage: "Number of User entries to cache.",
-		},
-		cli.IntFlag{
-			Name:  "proof-cache-size",
-			Usage: "Number of proof entries to cache.",
 		},
 		cli.StringFlag{
 			Name:  "gpg",
@@ -311,13 +358,9 @@ func (p *CommandLine) PopulateApp(addHelp bool, extraFlags []cli.Flag) {
 			Name:  "gpg-options",
 			Usage: "Options to use when calling GPG.",
 		},
-		cli.IntFlag{
-			Name:  "daemon-port",
-			Usage: "Specify a daemon port on 127.0.0.1.",
-		},
-		cli.BoolFlag{
-			Name:  "standalone",
-			Usage: "Use the client without any daemon support.",
+		cli.StringFlag{
+			Name:  "home, H",
+			Usage: "Specify an (alternate) home directory.",
 		},
 		cli.StringFlag{
 			Name:  "local-rpc-debug-unsafe",
@@ -327,27 +370,111 @@ func (p *CommandLine) PopulateApp(addHelp bool, extraFlags []cli.Flag) {
 			Name:  "log-file",
 			Usage: "Specify a log file for the keybase service.",
 		},
+		cli.StringFlag{
+			Name:  "log-format",
+			Usage: "Log format (default, plain, file, fancy).",
+		},
+		cli.StringFlag{
+			Name:  "merkle-kids",
+			Usage: "Set of admissable Merkle Tree fingerprints (colon-separated).",
+		},
 		cli.BoolFlag{
-			Name:  "split-log-output",
-			Usage: "Output service log messages to current terminal.",
+			Name:  "no-debug",
+			Usage: "Suppress debugging mode; takes precedence over --debug.",
+		},
+		cli.StringFlag{
+			Name:  "pgpdir, gpgdir",
+			Usage: "Specify a PGP directory (default is ~/.gnupg).",
+		},
+		cli.StringFlag{
+			Name:  "pinentry",
+			Usage: "Specify a path to find a pinentry program.",
+		},
+		cli.StringFlag{
+			Name:  "pid-file",
+			Usage: "Location of the keybased pid-file (to ensure only one running daemon).",
+		},
+		cli.IntFlag{
+			Name:  "proof-cache-size",
+			Usage: "Number of proof entries to cache.",
+		},
+		cli.StringFlag{
+			Name:  "proxy",
+			Usage: "Specify an HTTP(s) proxy to ship all Web requests over.",
+		},
+		cli.BoolFlag{
+			Name:  "push-disabled",
+			Usage: "Disable push server connection (which is on by default)",
+		},
+		cli.IntFlag{
+			Name:  "push-save-interval",
+			Usage: "Set the interval between saves of the push cache (in seconds)",
+		},
+		cli.StringFlag{
+			Name:  "push-server-uri",
+			Usage: "Specify a URI for contacting the Keybase push server",
+		},
+		cli.StringFlag{
+			Name:  "run-mode",
+			Usage: "Run mode (devel, staging, prod).", // These are defined in libkb/constants.go
+		},
+		cli.StringFlag{
+			Name:  "scraper-timeout",
+			Usage: "set the HTTP timeout for external proof scrapers",
+		},
+		cli.StringFlag{
+			Name:  "secret-keyring",
+			Usage: "Location of the Keybase secret-keyring (P3SKB-encoded).",
+		},
+		cli.StringFlag{
+			Name:  "server, s",
+			Usage: "Specify server API.",
+		},
+		cli.StringFlag{
+			Name:  "session-file",
+			Usage: "Specify an alternate session data file.",
+		},
+		cli.StringFlag{
+			Name:  "socket-file",
+			Usage: "Location of the keybased socket-file.",
+		},
+		cli.BoolFlag{
+			Name:  "standalone",
+			Usage: "Use the client without any daemon support.",
 		},
 		cli.StringFlag{
 			Name:  "timers",
-			Usage: "specify 'a' for API; 'r' for RPCs; and 'x' for eXternal API calls",
+			Usage: "Specify 'a' for API; 'r' for RPCs; and 'x' for eXternal API calls",
+		},
+		cli.StringFlag{
+			Name:  "tor-hidden-address",
+			Usage: fmt.Sprintf("set TOR address of keybase server; defaults to %s", libkb.TorServerURI),
+		},
+		cli.StringFlag{
+			Name:  "tor-mode",
+			Usage: "set TOR mode to be 'leaky', 'none', or 'strict'. 'none' by default. See 'help tor' for more details.",
+		},
+		cli.StringFlag{
+			Name:  "tor-proxy",
+			Usage: fmt.Sprintf("set TOR proxy; when Tor mode is on; defaults to %s when TOR is enabled", libkb.TorProxy),
+		},
+		cli.StringFlag{
+			Name:  "updater-config-file",
+			Usage: "Specify a path to the updater config file",
+		},
+		cli.IntFlag{
+			Name:  "user-cache-size",
+			Usage: "Number of User entries to cache.",
+		},
+		cli.StringFlag{
+			Name:  "vdebug",
+			Usage: "Verbose debugging; takes a comma-joined list of levels and tags",
 		},
 	}
 	if extraFlags != nil {
 		app.Flags = append(app.Flags, extraFlags...)
 	}
 
-	// Finally, add help if we asked for it
-	if addHelp {
-		app.Action = func(c *cli.Context) {
-			p.cmd = &CmdGeneralHelp{CmdBaseHelp{c}}
-			p.ctx = c
-			p.name = "help"
-		}
-	}
 	app.Commands = []cli.Command{}
 }
 
@@ -417,4 +544,10 @@ func (p *CommandLine) Parse(args []string) (cmd Command, err error) {
 
 func (p *CommandLine) SetOutputWriter(w io.Writer) {
 	p.app.Writer = w
+}
+
+// AddHelpTopics appends topics to the list of help topics for
+// this app.
+func (p *CommandLine) AddHelpTopics(topics []cli.HelpTopic) {
+	p.app.HelpTopics = append(p.app.HelpTopics, topics...)
 }

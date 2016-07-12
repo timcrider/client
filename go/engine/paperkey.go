@@ -1,3 +1,6 @@
+// Copyright 2015 Keybase, Inc. All rights reserved. Use of
+// this source code is governed by the included BSD license.
+
 // PaperKey creates paper backup keys for a user and pushes them to the server.
 // It checks for existing paper devices and offers to revoke the
 // keys.
@@ -8,13 +11,16 @@ package engine
 import (
 	"fmt"
 
+	"golang.org/x/net/context"
+
 	"github.com/keybase/client/go/libkb"
-	keybase1 "github.com/keybase/client/protocol/go"
+	keybase1 "github.com/keybase/client/go/protocol"
 )
 
 // PaperKey is an engine.
 type PaperKey struct {
 	passphrase libkb.PaperKeyPhrase
+	gen        *PaperKeyGen
 	libkb.Contextified
 }
 
@@ -33,7 +39,7 @@ func (e *PaperKey) Name() string {
 // GetPrereqs returns the engine prereqs.
 func (e *PaperKey) Prereqs() Prereqs {
 	return Prereqs{
-		Session: true,
+		Device: true,
 	}
 }
 
@@ -64,20 +70,27 @@ func (e *PaperKey) Run(ctx *Context) error {
 	if cki == nil {
 		return fmt.Errorf("no computed key infos")
 	}
+
 	var needReload bool
+	var devicesToRevoke []*libkb.Device
 	for i, bdev := range cki.PaperDevices() {
-		revoke, err := ctx.LoginUI.PromptRevokePaperKeys(
+		revoke, err := ctx.LoginUI.PromptRevokePaperKeys(context.TODO(),
 			keybase1.PromptRevokePaperKeysArg{
 				Device: *bdev.ProtExport(),
 				Index:  i,
 			})
 		if err != nil {
 			e.G().Log.Warning("prompt error: %s", err)
-			continue
+			return err
 		}
-		if !revoke {
-			continue
+		if revoke {
+			devicesToRevoke = append(devicesToRevoke, bdev)
 		}
+	}
+
+	// Revoke all keys at once, not one-by-one. This way, a cancelation of the
+	// experience above will stop all operations
+	for _, bdev := range devicesToRevoke {
 		reng := NewRevokeDeviceEngine(RevokeDeviceEngineArgs{ID: bdev.ID}, e.G())
 		if err := RunEngine(reng, ctx); err != nil {
 			// probably not a good idea to continue...
@@ -93,10 +106,11 @@ func (e *PaperKey) Run(ctx *Context) error {
 		}
 	}
 
-	signingKey, _, err := e.G().Keyrings.GetSecretKeyWithPrompt(ctx.LoginContext, libkb.SecretKeyArg{
+	ska := libkb.SecretKeyArg{
 		Me:      me,
 		KeyType: libkb.DeviceSigningKeyType,
-	}, ctx.SecretUI, "You must sign your new paper key")
+	}
+	signingKey, err := e.G().Keyrings.GetSecretKeyWithPrompt(ctx.SecretKeyPromptArg(ska, "You must sign your new paper key"))
 	if err != nil {
 		return err
 	}
@@ -111,15 +125,23 @@ func (e *PaperKey) Run(ctx *Context) error {
 		Me:         me,
 		SigningKey: signingKey,
 	}
-	kgeng := NewPaperKeyGen(kgarg, e.G())
-	if err := RunEngine(kgeng, ctx); err != nil {
+	e.gen = NewPaperKeyGen(kgarg, e.G())
+	if err := RunEngine(e.gen, ctx); err != nil {
 		return err
 	}
 
-	return ctx.LoginUI.DisplayPaperKeyPhrase(keybase1.DisplayPaperKeyPhraseArg{Phrase: e.passphrase.String()})
+	return ctx.LoginUI.DisplayPaperKeyPhrase(context.TODO(), keybase1.DisplayPaperKeyPhraseArg{Phrase: e.passphrase.String()})
 
 }
 
 func (e *PaperKey) Passphrase() string {
 	return e.passphrase.String()
+}
+
+func (e *PaperKey) SigKey() libkb.GenericKey {
+	return e.gen.SigKey()
+}
+
+func (e *PaperKey) EncKey() libkb.GenericKey {
+	return e.gen.EncKey()
 }

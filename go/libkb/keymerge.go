@@ -1,9 +1,12 @@
+// Copyright 2015 Keybase, Inc. All rights reserved. Use of
+// this source code is governed by the included BSD license.
+
 package libkb
 
 import (
 	"crypto"
 
-	"golang.org/x/crypto/openpgp/packet"
+	"github.com/keybase/go-crypto/openpgp/packet"
 )
 
 func combineSignatures(toSignatures []*packet.Signature, fromSignatures []*packet.Signature) (ret []*packet.Signature) {
@@ -28,6 +31,15 @@ func (to *PGPKeyBundle) MergeKey(from *PGPKeyBundle) {
 	for name, fromIdentity := range from.Identities {
 		if toIdentity, ok := to.Identities[name]; ok {
 			to.Identities[name].Signatures = combineSignatures(toIdentity.Signatures, fromIdentity.Signatures)
+
+			// There's a primary self-signature that we use. Always take the later
+			// of the two.
+			ssTo := to.Identities[name].SelfSignature
+			ssFrom := fromIdentity.SelfSignature
+			if ssFrom.CreationTime.After(ssTo.CreationTime) {
+				to.Identities[name].SelfSignature = ssFrom
+			}
+
 		} else {
 			to.Identities[fromIdentity.Name] = fromIdentity
 		}
@@ -45,6 +57,9 @@ func (to *PGPKeyBundle) MergeKey(from *PGPKeyBundle) {
 		if i, ok := existingSubkeys[subkey.PublicKey.Fingerprint]; ok {
 			if subkey.Sig.CreationTime.After(to.Subkeys[i].Sig.CreationTime) {
 				to.Subkeys[i].Sig = subkey.Sig
+				if subkey.Revocation != nil {
+					to.Subkeys[i].Revocation = subkey.Revocation
+				}
 			}
 		} else {
 			to.Subkeys = append(to.Subkeys, subkey)

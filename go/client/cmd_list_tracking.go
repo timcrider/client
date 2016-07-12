@@ -1,37 +1,42 @@
+// Copyright 2015 Keybase, Inc. All rights reserved. Use of
+// this source code is governed by the included BSD license.
+
 package client
 
 import (
 	"fmt"
 	"strings"
 
+	"golang.org/x/net/context"
+
 	"github.com/keybase/cli"
 	"github.com/keybase/client/go/libcmdline"
 	"github.com/keybase/client/go/libkb"
-	keybase1 "github.com/keybase/client/protocol/go"
+	keybase1 "github.com/keybase/client/go/protocol"
 )
 
 type CmdListTracking struct {
-	filter  string
-	json    bool
-	verbose bool
-	headers bool
-	user    *libkb.User
+	libkb.Contextified
+	assertion string
+	filter    string
+	json      bool
+	verbose   bool
+	headers   bool
 }
 
 func (s *CmdListTracking) ParseArgv(ctx *cli.Context) error {
-	nargs := len(ctx.Args())
-	var err error
+	if len(ctx.Args()) == 1 {
+		s.assertion = ctx.Args()[0]
+	} else if len(ctx.Args()) > 1 {
+		return fmt.Errorf("list-tracking takes at most one argument")
+	}
 
 	s.json = ctx.Bool("json")
 	s.verbose = ctx.Bool("verbose")
 	s.headers = ctx.Bool("headers")
 	s.filter = ctx.String("filter")
 
-	if nargs > 0 {
-		err = fmt.Errorf("List tracking doesn't take any arguments.")
-	}
-
-	return err
+	return nil
 }
 
 func displayTable(entries []keybase1.UserSummary, verbose bool, headers bool) (err error) {
@@ -100,15 +105,16 @@ func DisplayJSON(jsonStr string) error {
 }
 
 func (s *CmdListTracking) Run() error {
-	cli, err := GetUserClient()
+	cli, err := GetUserClient(s.G())
 	if err != nil {
 		return err
 	}
 
 	if s.json {
-		jsonStr, err := cli.ListTrackingJSON(keybase1.ListTrackingJSONArg{
-			Filter:  s.filter,
-			Verbose: s.verbose,
+		jsonStr, err := cli.ListTrackingJSON(context.TODO(), keybase1.ListTrackingJSONArg{
+			Assertion: s.assertion,
+			Filter:    s.filter,
+			Verbose:   s.verbose,
 		})
 		if err != nil {
 			return err
@@ -116,21 +122,30 @@ func (s *CmdListTracking) Run() error {
 		return DisplayJSON(jsonStr)
 	}
 
-	table, err := cli.ListTracking(keybase1.ListTrackingArg{Filter: s.filter})
+	table, err := cli.ListTracking(context.TODO(), keybase1.ListTrackingArg{Filter: s.filter, Assertion: s.assertion})
 	if err != nil {
 		return err
 	}
 	return displayTable(table, s.verbose, s.headers)
 }
 
-func NewCmdListTracking(cl *libcmdline.CommandLine) cli.Command {
+func NewCmdListTracking(cl *libcmdline.CommandLine, g *libkb.GlobalContext) cli.Command {
 	return cli.Command{
-		Name:  "list-tracking",
-		Usage: "List who you're tracking",
+		Name:         "list-tracking",
+		ArgumentHelp: "<username>",
+		Usage:        "List who username is tracking",
 		Action: func(c *cli.Context) {
-			cl.ChooseCommand(&CmdListTracking{}, "tracking", c)
+			cl.ChooseCommand(&CmdListTracking{Contextified: libkb.NewContextified(g)}, "tracking", c)
 		},
 		Flags: []cli.Flag{
+			cli.StringFlag{
+				Name:  "f, filter",
+				Usage: "Provide a regex filter.",
+			},
+			cli.BoolFlag{
+				Name:  "H, headers",
+				Usage: "Show column headers.",
+			},
 			cli.BoolFlag{
 				Name:  "j, json",
 				Usage: "Output as JSON (default is text).",
@@ -138,14 +153,6 @@ func NewCmdListTracking(cl *libcmdline.CommandLine) cli.Command {
 			cli.BoolFlag{
 				Name:  "v, verbose",
 				Usage: "A full dump, with more gory details.",
-			},
-			cli.BoolFlag{
-				Name:  "H, headers",
-				Usage: "Show column headers.",
-			},
-			cli.StringFlag{
-				Name:  "f, filter",
-				Usage: "Provide a regex filter.",
 			},
 		},
 	}

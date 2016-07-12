@@ -1,22 +1,27 @@
+// Copyright 2015 Keybase, Inc. All rights reserved. Use of
+// this source code is governed by the included BSD license.
+
 package libkb
 
 import (
 	"fmt"
 
-	keybase1 "github.com/keybase/client/protocol/go"
+	keybase1 "github.com/keybase/client/go/protocol"
 	jsonw "github.com/keybase/go-jsonw"
 )
 
 type LoadUserArg struct {
-	UID               keybase1.UID
-	Name              string // Can also be an assertion like foo@twitter
-	PublicKeyOptional bool
-	NoCacheResult     bool // currently ignore
-	Self              bool
-	ForceReload       bool
-	AllKeys           bool
-	LoginContext      LoginContext
 	Contextified
+	UID                      keybase1.UID
+	Name                     string // Can also be an assertion like foo@twitter
+	PublicKeyOptional        bool
+	NoCacheResult            bool // currently ignore
+	Self                     bool
+	ForceReload              bool
+	AllKeys                  bool
+	LoginContext             LoginContext
+	AbortIfSigchainUnchanged bool
+	ResolveBody              *jsonw.Wrapper // some load paths plumb this through
 }
 
 func NewLoadUserArg(g *GlobalContext) LoadUserArg {
@@ -32,6 +37,12 @@ func NewLoadUserForceArg(g *GlobalContext) LoadUserArg {
 func NewLoadUserByNameArg(g *GlobalContext, name string) LoadUserArg {
 	arg := NewLoadUserArg(g)
 	arg.Name = name
+	return arg
+}
+
+func NewLoadUserByUIDArg(g *GlobalContext, uid keybase1.UID) LoadUserArg {
+	arg := NewLoadUserArg(g)
+	arg.UID = uid
 	return arg
 }
 
@@ -75,10 +86,10 @@ func (arg *LoadUserArg) resolveUID() (ResolveResult, error) {
 	if len(arg.Name) == 0 {
 		// this won't happen anymore because check moved to
 		// checkUIDName() func, but just in case
-		return rres, fmt.Errorf("resolveUID:  no uid or name")
+		return rres, fmt.Errorf("resolveUID: no uid or name")
 	}
 
-	if rres = ResolveUID(arg.Name); rres.err != nil {
+	if rres = arg.G().Resolver.ResolveWithBody(arg.Name); rres.err != nil {
 		return rres, rres.err
 	}
 
@@ -96,7 +107,7 @@ func (arg *LoadUserArg) checkSelf() {
 		return
 	}
 
-	myuid := myUID(G, arg.LoginContext)
+	myuid := myUID(arg.G(), arg.LoginContext)
 	if myuid.Exists() && arg.UID.Exists() && myuid.Equal(arg.UID) {
 		arg.Self = true
 	}
@@ -107,13 +118,22 @@ func LoadMe(arg LoadUserArg) (*User, error) {
 	return LoadUser(arg)
 }
 
+func LoadMeByUID(g *GlobalContext, uid keybase1.UID) (*User, error) {
+	return LoadMe(NewLoadUserByUIDArg(g, uid))
+}
+
 func LoadUser(arg LoadUserArg) (ret *User, err error) {
-	G.Log.Debug("LoadUser: %+v", arg)
+	defer TimeLog(fmt.Sprintf("LoadUser: %+v", arg), arg.G().Clock().Now(), arg.G().Log.Debug)
+	arg.G().Log.Debug("LoadUser: %+v", arg)
+	var refresh bool
 
 	// Whatever the reply is, pass along our desired global context
 	defer func() {
 		if ret != nil {
 			ret.SetGlobalContext(arg.G())
+			if refresh {
+				arg.G().NotifyRouter.HandleUserChanged(ret.GetUID())
+			}
 		}
 	}()
 
@@ -122,7 +142,7 @@ func LoadUser(arg LoadUserArg) (ret *User, err error) {
 		return nil, err
 	}
 
-	G.Log.Debug("+ LoadUser(uid=%v, name=%v)", arg.UID, arg.Name)
+	arg.G().Log.Debug("+ LoadUser(uid=%v, name=%v)", arg.UID, arg.Name)
 
 	// resolve the uid from the name, if necessary
 	rres, err := arg.resolveUID()
@@ -133,10 +153,17 @@ func LoadUser(arg LoadUserArg) (ret *User, err error) {
 	// check to see if this is a self load
 	arg.checkSelf()
 
-	G.Log.Debug("| resolved to %s", arg.UID)
+	arg.G().Log.Debug("| resolved to %s", arg.UID)
+
+	// We can get the user object's body from either the resolution result or
+	// if it was plumbed through as a parameter.
+	resolveBody := rres.body
+	if resolveBody == nil {
+		resolveBody = arg.ResolveBody
+	}
 
 	// load user from local, remote
-	ret, err = loadUser(arg.G(), arg.UID, rres, arg.ForceReload)
+	ret, refresh, err = loadUser(arg.G(), arg.UID, resolveBody, arg.ForceReload)
 	if err != nil {
 		return nil, err
 	}
@@ -144,7 +171,7 @@ func LoadUser(arg LoadUserArg) (ret *User, err error) {
 	// Match the returned User object to the Merkle tree. Also make sure
 	// that the username queried for matches the User returned (if it
 	// was indeed queried for)
-	if err = ret.leaf.MatchUser(ret, arg.UID, rres.kbUsername); err != nil {
+	if err = ret.leaf.MatchUser(ret, arg.UID, rres.GetNormalizedQueriedUsername()); err != nil {
 		return
 	}
 
@@ -152,8 +179,16 @@ func LoadUser(arg LoadUserArg) (ret *User, err error) {
 		return
 	}
 
-	if ret.sigHints, err = LoadAndRefreshSigHints(ret.id); err != nil {
+	if arg.AbortIfSigchainUnchanged && ret.sigChain().wasFullyCached {
+		return nil, nil
+	}
+
+	if ret.sigHints, err = LoadAndRefreshSigHints(ret.id, arg.G()); err != nil {
 		return
+	}
+
+	if ret.sigHints != nil && ret.sigHints.dirty {
+		refresh = true
 	}
 
 	// Proactively cache fetches from remote server to local storage
@@ -176,7 +211,7 @@ func LoadUser(arg LoadUserArg) (ret *User, err error) {
 
 		var emsg string
 		if arg.Self {
-			emsg = "You don't have a public key; try `keybase push` if you have a key; or `keybase gen` if you don't"
+			emsg = "You don't have a public key; try `keybase pgp select` or `keybase pgp import` if you have a key; or `keybase pgp gen` if you don't"
 		}
 		err = NoKeyError{emsg}
 	}
@@ -184,15 +219,16 @@ func LoadUser(arg LoadUserArg) (ret *User, err error) {
 	return
 }
 
-func loadUser(g *GlobalContext, uid keybase1.UID, rres ResolveResult, force bool) (*User, error) {
+func loadUser(g *GlobalContext, uid keybase1.UID, resolveBody *jsonw.Wrapper, force bool) (*User, bool, error) {
 	local, err := loadUserFromLocalStorage(g, uid)
+	var refresh bool
 	if err != nil {
 		g.Log.Warning("Failed to load %s from storage: %s", uid, err)
 	}
 
-	leaf, err := LookupMerkleLeaf(uid, local)
+	leaf, err := lookupMerkleLeaf(g, uid, local)
 	if err != nil {
-		return nil, err
+		return nil, refresh, err
 	}
 
 	var f1, loadRemote bool
@@ -201,9 +237,10 @@ func loadUser(g *GlobalContext, uid keybase1.UID, rres ResolveResult, force bool
 		g.Log.Debug("| No local user stored for %s", uid)
 		loadRemote = true
 	} else if f1, err = local.CheckBasicsFreshness(leaf.idVersion); err != nil {
-		return nil, err
+		return nil, refresh, err
 	} else {
 		loadRemote = !f1
+		refresh = loadRemote
 	}
 
 	g.Log.Debug("| Freshness: basics=%v; for %s", f1, uid)
@@ -211,16 +248,16 @@ func loadUser(g *GlobalContext, uid keybase1.UID, rres ResolveResult, force bool
 	var ret *User
 	if !loadRemote && !force {
 		ret = local
-	} else if ret, err = loadUserFromServer(g, uid, rres.body); err != nil {
-		return nil, err
+	} else if ret, err = LoadUserFromServer(g, uid, resolveBody); err != nil {
+		return nil, refresh, err
 	}
 
 	if ret == nil {
-		return nil, nil
+		return nil, refresh, nil
 	}
 
 	ret.leaf = *leaf
-	return ret, nil
+	return ret, refresh, nil
 }
 
 func loadUserFromLocalStorage(g *GlobalContext, uid keybase1.UID) (u *User, err error) {
@@ -251,7 +288,7 @@ func loadUserFromLocalStorage(g *GlobalContext, uid keybase1.UID) (u *User, err 
 	return
 }
 
-func loadUserFromServer(g *GlobalContext, uid keybase1.UID, body *jsonw.Wrapper) (u *User, err error) {
+func LoadUserFromServer(g *GlobalContext, uid keybase1.UID, body *jsonw.Wrapper) (u *User, err error) {
 	g.Log.Debug("+ Load User from server: %s", uid)
 
 	// Res.body might already have been preloaded a a result of a Resolve call earlier.
@@ -288,17 +325,44 @@ func myUID(g *GlobalContext, lctx LoginContext) keybase1.UID {
 	return g.GetMyUID()
 }
 
-func LookupMerkleLeaf(uid keybase1.UID, local *User) (f *MerkleUserLeaf, err error) {
+func lookupMerkleLeaf(g *GlobalContext, uid keybase1.UID, local *User) (f *MerkleUserLeaf, err error) {
 	if uid.IsNil() {
-		err = fmt.Errorf("uid parameter for LookupMerkleLeaf empty")
+		err = fmt.Errorf("uid parameter for lookupMerkleLeaf empty")
 		return
 	}
+
 	q := NewHTTPArgs()
 	q.Add("uid", UIDArg(uid))
 
-	f, err = G.MerkleClient.LookupUser(q)
+	f, err = g.MerkleClient.LookupUser(q)
 	if err == nil && f == nil && local != nil {
 		err = fmt.Errorf("User not found in server Merkle tree")
 	}
+
 	return
+}
+
+func LoadUserPlusKeys(g *GlobalContext, uid keybase1.UID) (keybase1.UserPlusKeys, error) {
+	var up keybase1.UserPlusKeys
+	if uid.IsNil() {
+		return up, fmt.Errorf("Nil UID")
+	}
+
+	arg := NewLoadUserArg(g)
+	arg.UID = uid
+	arg.PublicKeyOptional = true
+	u, err := LoadUser(arg)
+	if err != nil {
+		return up, err
+	}
+	if u == nil {
+		return up, fmt.Errorf("Nil user, nil error from LoadUser")
+	}
+
+	up, err = u.ExportToUserPlusKeys(keybase1.Time(0)), nil
+	if err != nil {
+		return up, err
+	}
+
+	return up, nil
 }

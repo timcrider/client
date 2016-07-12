@@ -1,3 +1,6 @@
+// Copyright 2015 Keybase, Inc. All rights reserved. Use of
+// this source code is governed by the included BSD license.
+
 package libkb
 
 import (
@@ -120,7 +123,7 @@ var allKeys = []string{
 
 func TestParseKeys(t *testing.T) {
 	for _, k := range allKeys {
-		_, err := ReadOneKeyFromString(k)
+		_, _, err := ReadOneKeyFromString(k)
 		if err != nil {
 			t.Fatal(err)
 		}

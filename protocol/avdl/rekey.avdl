@@ -1,0 +1,71 @@
+@namespace("keybase.1")
+
+protocol rekey {
+  import idl "common.avdl";
+
+  @typedef("string")
+  record TLFID {}
+
+  record TLF {
+    TLFID id;
+    string name;
+    array<string> writers;
+    array<string> readers;
+    boolean isPrivate;
+  }
+
+  record ProblemTLF {
+    TLF tlf;
+    int score;
+
+    // MK Note 2016.06.29 -- Please excuse snake case here. It's too much
+    // of a pain to change it on the server, so leave it here.
+    array<KID> solution_kids;
+  }
+
+  /**
+   ProblemSet is for a particular (user,kid) that initiated a rekey problem.
+   This problem consists of one or more problem TLFs, which are individually scored
+   and have attendant solutions --- devices that if they came online can rekey and
+   solve the ProblemTLF.
+   */
+  record ProblemSet {
+    User user;
+    KID kid;
+    array<ProblemTLF> tlfs;
+  }
+
+  record ProblemSetDevices {
+    ProblemSet problemSet;
+    array<Device> devices;
+  }
+
+  enum Outcome {
+    NONE_0,
+    FIXED_1,
+    IGNORED_2
+  }
+
+  /**
+   ShowPendingRekeyStatus shows either pending gregor-initiated rekey harassments
+   or nothing if none were pending.
+   */
+  void showPendingRekeyStatus(int sessionID);
+
+  /**
+   GetPendingRekeyStatus returns the pending ProblemSetDevices.
+   */
+  ProblemSetDevices getPendingRekeyStatus(int sessionID);
+
+  /**
+   DebugShowRekeyStatus is used by the CLI to kick off a "ShowRekeyStatus" window for
+   the current user.
+   */
+  void debugShowRekeyStatus(int sessionID);
+
+  /**
+   rekeyStatusFinish is called when work is completed on a given RekeyStatus window. The Outcome
+   can be Fixed or Ignored.
+   */
+  Outcome rekeyStatusFinish(int sessionID);
+}

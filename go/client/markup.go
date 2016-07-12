@@ -1,3 +1,6 @@
+// Copyright 2015 Keybase, Inc. All rights reserved. Use of
+// this source code is governed by the included BSD license.
+
 package client
 
 import (
@@ -8,7 +11,7 @@ import (
 
 	Q "github.com/PuerkitoBio/goquery"
 	"github.com/keybase/client/go/libkb"
-	keybase1 "github.com/keybase/client/protocol/go"
+	keybase1 "github.com/keybase/client/go/protocol"
 	"github.com/kr/text"
 	"golang.org/x/net/html"
 	"golang.org/x/net/html/atom"
@@ -222,4 +225,13 @@ func RenderText(w io.Writer, txt keybase1.Text) {
 	} else {
 		Render(w, libkb.NewMarkup(txt.Data))
 	}
+}
+
+// BoolString maps a bool to true and false strings (like "yes"
+// and "no").  For example:  BoolString(b, "yes", "no").
+func BoolString(b bool, t, f string) string {
+	if b {
+		return t
+	}
+	return f
 }

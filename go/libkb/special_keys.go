@@ -1,12 +1,16 @@
+// Copyright 2015 Keybase, Inc. All rights reserved. Use of
+// this source code is governed by the included BSD license.
+
 package libkb
 
 import (
-	keybase1 "github.com/keybase/client/protocol/go"
+	keybase1 "github.com/keybase/client/go/protocol"
 )
 
 // SpecialKeyRing holds blessed keys, like the one Keybase uses to sign
 // its Merkle Root.
 type SpecialKeyRing struct {
+	Contextified
 
 	// Cache of keys that are used in verifying the root
 	keys map[keybase1.KID]GenericKey
@@ -18,10 +22,11 @@ type SpecialKeyRing struct {
 // NewSpecialKeyRing allocates a new SpecialKeyRing with the given
 // vector of KIDs. For NaCl keys, it will actually import those
 // keys into the Keyring.
-func NewSpecialKeyRing(v []keybase1.KID) *SpecialKeyRing {
+func NewSpecialKeyRing(v []keybase1.KID, g *GlobalContext) *SpecialKeyRing {
 	ret := &SpecialKeyRing{
-		keys:      make(map[keybase1.KID]GenericKey),
-		validKIDs: make(map[keybase1.KID]bool),
+		keys:         make(map[keybase1.KID]GenericKey),
+		validKIDs:    make(map[keybase1.KID]bool),
+		Contextified: NewContextified(g),
 	}
 	for _, kid := range v {
 		if key, _ := ImportKeypairFromKID(kid); key != nil {
@@ -39,8 +44,8 @@ func (sk *SpecialKeyRing) IsValidKID(kid keybase1.KID) bool {
 	return val && found
 }
 
-func LoadPGPKeyFromLocalDB(k keybase1.KID) (*PGPKeyBundle, error) {
-	dbobj, err := G.LocalDb.Get(DbKey{
+func LoadPGPKeyFromLocalDB(k keybase1.KID, g *GlobalContext) (*PGPKeyBundle, error) {
+	dbobj, err := g.LocalDb.Get(DbKey{
 		Typ: DBPGPKey,
 		Key: k.String(),
 	})
@@ -50,7 +55,9 @@ func LoadPGPKeyFromLocalDB(k keybase1.KID) (*PGPKeyBundle, error) {
 	if dbobj == nil {
 		return nil, nil
 	}
-	return GetOneKey(dbobj)
+	kb, w, err := GetOneKey(dbobj)
+	w.Warn(g)
+	return kb, err
 }
 
 // Load takes a blessed KID and returns, if possible, the GenericKey
@@ -59,7 +66,7 @@ func LoadPGPKeyFromLocalDB(k keybase1.KID) (*PGPKeyBundle, error) {
 // to fetch the key from the keybase server.
 func (sk *SpecialKeyRing) Load(kid keybase1.KID) (GenericKey, error) {
 
-	G.Log.Debug("+ SpecialKeyRing.Load(%s)", kid)
+	sk.G().Log.Debug("+ SpecialKeyRing.Load(%s)", kid)
 
 	if !sk.IsValidKID(kid) {
 		err := UnknownSpecialKIDError{kid}
@@ -67,41 +74,44 @@ func (sk *SpecialKeyRing) Load(kid keybase1.KID) (GenericKey, error) {
 	}
 
 	if key, found := sk.keys[kid]; found {
-		G.Log.Debug("- SpecialKeyRing.Load(%s) -> hit inmem cache", kid)
+		sk.G().Log.Debug("- SpecialKeyRing.Load(%s) -> hit inmem cache", kid)
 		return key, nil
 	}
 
-	key, err := LoadPGPKeyFromLocalDB(kid)
+	key, err := LoadPGPKeyFromLocalDB(kid, sk.G())
 
 	if err != nil || key == nil {
 
-		G.Log.Debug("| Load(%s) going to network", kid)
+		sk.G().Log.Debug("| Load(%s) going to network", kid)
 		var res *APIRes
-		res, err = G.API.Get(APIArg{
+		res, err = sk.G().API.Get(APIArg{
 			Endpoint:    "key/special",
 			NeedSession: false,
 			Args: HTTPArgs{
 				"kid": S{kid.String()},
 			},
+			Contextified: NewContextified(sk.G()),
 		})
-
+		var w *Warnings
 		if err == nil {
-			key, err = GetOneKey(res.Body.AtKey("bundle"))
+			key, w, err = GetOneKey(res.Body.AtKey("bundle"))
 		}
 		if err == nil {
-			if e2 := key.StoreToLocalDb(); e2 != nil {
-				G.Log.Warning("Failed to store key: %s", e2)
+			w.Warn(sk.G())
+
+			if e2 := key.StoreToLocalDb(sk.G()); e2 != nil {
+				sk.G().Log.Warning("Failed to store key: %s", e2)
 			}
 		}
 	} else {
-		G.Log.Debug("| Load(%s) hit DB-backed cache", kid)
+		sk.G().Log.Debug("| Load(%s) hit DB-backed cache", kid)
 	}
 
 	if err == nil && key != nil {
 		sk.keys[kid] = key
 	}
 
-	G.Log.Debug("- SpecialKeyRing.Load(%s)", kid)
+	sk.G().Log.Debug("- SpecialKeyRing.Load(%s)", kid)
 
 	return key, err
 }

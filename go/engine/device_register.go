@@ -1,10 +1,11 @@
+// Copyright 2015 Keybase, Inc. All rights reserved. Use of
+// this source code is governed by the included BSD license.
+
 package engine
 
 import (
-	"errors"
-
 	"github.com/keybase/client/go/libkb"
-	keybase1 "github.com/keybase/client/protocol/go"
+	keybase1 "github.com/keybase/client/go/protocol"
 )
 
 type DeviceRegisterArgs struct {
@@ -18,8 +19,6 @@ type DeviceRegister struct {
 	deviceID keybase1.DeviceID
 	libkb.Contextified
 }
-
-var ErrDeviceAlreadyRegistered = errors.New("Device already registered (device id exists in config)")
 
 func NewDeviceRegister(args *DeviceRegisterArgs, g *libkb.GlobalContext) *DeviceRegister {
 	return &DeviceRegister{
@@ -43,8 +42,8 @@ func (d *DeviceRegister) SubConsumers() []libkb.UIConsumer {
 func (d *DeviceRegister) Prereqs() Prereqs { return Prereqs{} }
 
 func (d *DeviceRegister) Run(ctx *Context) error {
-	if d.args.Me.HasDeviceInCurrentInstall() {
-		return ErrDeviceAlreadyRegistered
+	if d.args.Me.HasCurrentDeviceInCurrentInstall() {
+		return libkb.DeviceAlreadyProvisionedError{}
 	}
 
 	var err error
@@ -61,9 +60,6 @@ func (d *DeviceRegister) Run(ctx *Context) error {
 
 	if wr := d.G().Env.GetConfigWriter(); wr != nil {
 		if err := wr.SetDeviceID(d.deviceID); err != nil {
-			return err
-		}
-		if err := wr.Write(); err != nil {
 			return err
 		}
 		ctx.LogUI.Debug("Setting Device ID to %s", d.deviceID)

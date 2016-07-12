@@ -1,3 +1,6 @@
+// Copyright 2015 Keybase, Inc. All rights reserved. Use of
+// this source code is governed by the included BSD license.
+
 package libkb
 
 import (
@@ -6,8 +9,7 @@ import (
 	"os"
 	"strings"
 
-	triplesec "github.com/keybase/go-triplesec"
-	"golang.org/x/crypto/openpgp"
+	"github.com/keybase/go-crypto/openpgp"
 )
 
 type KeyringFile struct {
@@ -50,8 +52,6 @@ func (g *GlobalContext) SKBFilenameForUser(un NormalizedUsername) string {
 	return strings.Replace(tmp, token, un.String(), -1)
 }
 
-// Note:  you need to be logged in as 'un' for this function to
-// work.  Otherwise, it just silently returns nil, nil.
 func LoadSKBKeyring(un NormalizedUsername, g *GlobalContext) (*SKBKeyringFile, error) {
 	if un.IsNil() {
 		return nil, NoUsernameError{}
@@ -189,7 +189,7 @@ type SecretKeyArg struct {
 // looking for keys synced from the server, and if that fails, tries
 // those in the local Keyring that are also active for the user.
 // In any case, the key will be locked.
-func (k *Keyrings) GetSecretKeyLocked(lctx LoginContext, ska SecretKeyArg) (ret *SKB, which string, err error) {
+func (k *Keyrings) GetSecretKeyLocked(lctx LoginContext, ska SecretKeyArg) (ret *SKB, err error) {
 	k.G().Log.Debug("+ GetSecretKeyLocked()")
 	defer func() {
 		k.G().Log.Debug("- GetSecretKeyLocked() -> %s", ErrToOk(err))
@@ -206,23 +206,23 @@ func (k *Keyrings) GetSecretKeyLocked(lctx LoginContext, ska SecretKeyArg) (ret 
 	if lctx != nil {
 		ret, err = lctx.LockedLocalSecretKey(ska)
 		if err != nil {
-			return ret, which, err
+			return ret, err
 		}
 	} else {
 		aerr := k.G().LoginState().Account(func(a *Account) {
 			ret, err = a.LockedLocalSecretKey(ska)
 		}, "LockedLocalSecretKey")
 		if err != nil {
-			return ret, which, err
+			return ret, err
 		}
 		if aerr != nil {
-			return nil, which, aerr
+			return nil, aerr
 		}
 	}
 
 	if ret != nil {
 		k.G().Log.Debug("| Getting local secret key")
-		return
+		return ret, nil
 	}
 
 	var pub GenericKey
@@ -230,50 +230,153 @@ func (k *Keyrings) GetSecretKeyLocked(lctx LoginContext, ska SecretKeyArg) (ret 
 	if ska.KeyType != PGPKeyType {
 		k.G().Log.Debug("| Skipped Synced PGP key (via options)")
 		err = NoSecretKeyError{}
-		return
+		return nil, err
 	}
 
 	if ret, err = ska.Me.SyncedSecretKey(lctx); err != nil {
 		k.G().Log.Warning("Error fetching synced PGP secret key: %s", err)
-		return
+		return nil, err
 	}
 	if ret == nil {
 		err = NoSecretKeyError{}
-		return
+		return nil, err
 	}
 
 	if pub, err = ret.GetPubKey(); err != nil {
-		return
+		return nil, err
 	}
 
 	if !KeyMatchesQuery(pub, ska.KeyQuery, ska.ExactMatch) {
 		k.G().Log.Debug("| Can't use Synced PGP key; doesn't match query %s", ska.KeyQuery)
 		err = NoSecretKeyError{}
-		return nil, "", err
+		return nil, err
 
 	}
 
-	which = "your Keybase.io passphrase"
-	return
+	return ret, nil
+}
+
+func (k *Keyrings) cachedSecretKey(lctx LoginContext, ska SecretKeyArg) GenericKey {
+	var key GenericKey
+	var err error
+	if lctx != nil {
+		key, err = lctx.CachedSecretKey(ska)
+	} else {
+		aerr := k.G().LoginState().Account(func(a *Account) {
+			key, err = a.CachedSecretKey(ska)
+		}, "Keyrings - cachedSecretKey")
+		if aerr != nil {
+			k.G().Log.Debug("Account error: %s", aerr)
+		}
+	}
+
+	if key != nil && err == nil {
+		k.G().Log.Debug("found cached secret key for ska: %+v", ska)
+	} else if err != nil {
+		if _, notFound := err.(NotFoundError); !notFound {
+			k.G().Log.Debug("error getting cached secret key: %s", err)
+		}
+	}
+
+	return key
+}
+
+func (k *Keyrings) setCachedSecretKey(lctx LoginContext, ska SecretKeyArg, key GenericKey) {
+	k.G().Log.Debug("caching secret key for ska: %+v", ska)
+	var setErr error
+	if lctx != nil {
+		setErr = lctx.SetCachedSecretKey(ska, key)
+	} else {
+		aerr := k.G().LoginState().Account(func(a *Account) {
+			setErr = a.SetCachedSecretKey(ska, key)
+		}, "GetSecretKeyWithPrompt - SetCachedSecretKey")
+		if aerr != nil {
+			k.G().Log.Debug("Account error: %s", aerr)
+		}
+	}
+	if setErr != nil {
+		k.G().Log.Debug("SetCachedSecretKey error: %s", setErr)
+	}
+}
+
+type SecretKeyPromptArg struct {
+	LoginContext   LoginContext
+	Ska            SecretKeyArg
+	SecretUI       SecretUI
+	Reason         string
+	UseCancelCache bool /* if true, when user cancels prompt, don't prompt again for 5m */
 }
 
 // TODO: Figure out whether and how to dep-inject the SecretStore.
-func (k *Keyrings) GetSecretKeyWithPrompt(lctx LoginContext, ska SecretKeyArg, secretUI SecretUI, reason string) (key GenericKey, skb *SKB, err error) {
-	k.G().Log.Debug("+ GetSecretKeyWithPrompt(%s)", reason)
+func (k *Keyrings) GetSecretKeyWithPrompt(arg SecretKeyPromptArg) (key GenericKey, err error) {
+	k.G().Log.Debug("+ GetSecretKeyWithPrompt(%s)", arg.Reason)
 	defer func() {
 		k.G().Log.Debug("- GetSecretKeyWithPrompt() -> %s", ErrToOk(err))
 	}()
-	var which string
-	if skb, which, err = k.GetSecretKeyLocked(lctx, ska); err != nil {
+
+	key = k.cachedSecretKey(arg.LoginContext, arg.Ska)
+	if key != nil {
+		return key, err
+	}
+
+	key, _, err = k.GetSecretKeyAndSKBWithPrompt(arg)
+
+	if key != nil && err == nil {
+		k.setCachedSecretKey(arg.LoginContext, arg.Ska, key)
+	}
+
+	return key, err
+}
+
+func (k *Keyrings) GetSecretKeyWithoutPrompt(lctx LoginContext, ska SecretKeyArg) (key GenericKey, err error) {
+	k.G().Log.Debug("+ GetSecretKeyWithoutPrompt()")
+	defer func() {
+		k.G().Log.Debug("- GetSecretKeyWithoutPrompt() -> %s", ErrToOk(err))
+	}()
+
+	key = k.cachedSecretKey(lctx, ska)
+	if key != nil {
+		k.G().Log.Debug("  found cached secret key")
+		return key, err
+	}
+
+	k.G().Log.Debug("  no cached secret key, trying via secretStore")
+
+	// not cached, so try to unlock without prompting
+	if ska.Me == nil {
+		err = NoUsernameError{}
+		return nil, err
+	}
+	secretStore := NewSecretStore(k.G(), ska.Me.GetNormalizedName())
+
+	skb, err := k.GetSecretKeyLocked(lctx, ska)
+	if err != nil {
+		return nil, err
+	}
+
+	key, err = skb.UnlockNoPrompt(lctx, secretStore)
+	if key != nil && err == nil {
+		k.setCachedSecretKey(lctx, ska, key)
+	}
+
+	return key, err
+}
+
+func (k *Keyrings) GetSecretKeyAndSKBWithPrompt(arg SecretKeyPromptArg) (key GenericKey, skb *SKB, err error) {
+	k.G().Log.Debug("+ GetSecretKeyAndSKBWithPrompt(%s)", arg.Reason)
+	defer func() {
+		k.G().Log.Debug("- GetSecretKeyAndSKBWithPrompt() -> %s", ErrToOk(err))
+	}()
+	if skb, err = k.GetSecretKeyLocked(arg.LoginContext, arg.Ska); err != nil {
 		skb = nil
 		return
 	}
 	var secretStore SecretStore
-	if ska.Me != nil {
-		skb.SetUID(ska.Me.GetUID())
-		secretStore = NewSecretStore(ska.Me.GetNormalizedName())
+	if arg.Ska.Me != nil {
+		skb.SetUID(arg.Ska.Me.GetUID())
+		secretStore = NewSecretStore(k.G(), arg.Ska.Me.GetNormalizedName())
 	}
-	if key, err = skb.PromptAndUnlock(lctx, reason, which, secretStore, secretUI, nil, ska.Me); err != nil {
+	if key, err = skb.PromptAndUnlock(arg, secretStore, arg.Ska.Me); err != nil {
 		key = nil
 		skb = nil
 		return
@@ -287,12 +390,12 @@ func (k *Keyrings) GetSecretKeyWithStoredSecret(lctx LoginContext, ska SecretKey
 		k.G().Log.Debug("- GetSecretKeyWithStoredSecret() -> %s", ErrToOk(err))
 	}()
 	var skb *SKB
-	skb, _, err = k.GetSecretKeyLocked(lctx, ska)
+	skb, err = k.GetSecretKeyLocked(lctx, ska)
 	if err != nil {
 		return
 	}
 	skb.SetUID(me.GetUID())
-	return skb.UnlockWithStoredSecret(secretRetriever)
+	return skb.UnlockWithStoredSecret(lctx, secretRetriever)
 }
 
 func (k *Keyrings) GetSecretKeyWithPassphrase(lctx LoginContext, me *User, passphrase string, secretStorer SecretStorer) (key GenericKey, err error) {
@@ -305,12 +408,12 @@ func (k *Keyrings) GetSecretKeyWithPassphrase(lctx LoginContext, me *User, passp
 		KeyType: DeviceSigningKeyType,
 	}
 	var skb *SKB
-	skb, _, err = k.GetSecretKeyLocked(lctx, ska)
+	skb, err = k.GetSecretKeyLocked(lctx, ska)
 	if err != nil {
 		return
 	}
 	skb.SetUID(me.GetUID())
-	var tsec *triplesec.Cipher
+	var tsec Triplesec
 	var pps *PassphraseStream
 	if lctx != nil {
 		tsec = lctx.PassphraseStreamCache().Triplesec()
@@ -321,7 +424,7 @@ func (k *Keyrings) GetSecretKeyWithPassphrase(lctx LoginContext, me *User, passp
 			pps = sc.PassphraseStream()
 		}, "StreamCache - tsec, pps")
 	}
-	return skb.UnlockSecretKey(lctx, passphrase, tsec, pps, secretStorer, nil)
+	return skb.UnlockSecretKey(lctx, passphrase, tsec, pps, secretStorer)
 }
 
 type EmptyKeyRing struct{}

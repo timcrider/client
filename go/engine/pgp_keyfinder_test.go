@@ -1,13 +1,11 @@
+// Copyright 2015 Keybase, Inc. All rights reserved. Use of
+// this source code is governed by the included BSD license.
+
 // Tests for the PGPKeyfinder engine.
 
 package engine
 
-import (
-	"testing"
-
-	"github.com/keybase/client/go/libkb"
-	keybase1 "github.com/keybase/client/protocol/go"
-)
+import "testing"
 
 func TestPGPKeyfinder(t *testing.T) {
 	tc := SetupEngineTest(t, "PGPKeyfinder")
@@ -18,14 +16,9 @@ func TestPGPKeyfinder(t *testing.T) {
 	trackAlice(tc, u)
 	defer untrackAlice(tc, u)
 
-	trackUI := &FakeIdentifyUI{
-		Proofs: make(map[string]string),
-	}
-
-	ctx := &Context{IdentifyUI: trackUI, SecretUI: u.NewSecretUI()}
+	ctx := &Context{}
 	arg := &PGPKeyfinderArg{
-		Users:     []string{"t_alice", "t_bob+kbtester1@twitter", "t_charlie+tacovontaco@twitter"},
-		SkipTrack: true,
+		Usernames: []string{"t_alice", "t_bob", "t_charlie"},
 	}
 	eng := NewPGPKeyfinder(arg, tc.G)
 	if err := RunEngine(eng, ctx); err != nil {
@@ -42,13 +35,9 @@ func TestPGPKeyfinderLoggedOut(t *testing.T) {
 	tc := SetupEngineTest(t, "PGPKeyfinder")
 	defer tc.Cleanup()
 
-	trackUI := &FakeIdentifyUI{
-		Proofs: make(map[string]string),
-	}
-
-	ctx := &Context{IdentifyUI: trackUI, SecretUI: &libkb.TestSecretUI{}}
+	ctx := &Context{}
 	arg := &PGPKeyfinderArg{
-		Users: []string{"t_alice", "t_bob+kbtester1@twitter", "t_charlie+tacovontaco@twitter"},
+		Usernames: []string{"t_alice", "t_bob", "t_charlie"},
 	}
 	eng := NewPGPKeyfinder(arg, tc.G)
 	if err := RunEngine(eng, ctx); err != nil {
@@ -60,15 +49,3 @@ func TestPGPKeyfinderLoggedOut(t *testing.T) {
 		t.Errorf("number of users found: %d, expected 3", len(up))
 	}
 }
-
-type idLubaUI struct{}
-
-func (u *idLubaUI) FinishWebProofCheck(keybase1.RemoteProof, keybase1.LinkCheckResult)    {}
-func (u *idLubaUI) FinishSocialProofCheck(keybase1.RemoteProof, keybase1.LinkCheckResult) {}
-func (u *idLubaUI) Confirm(*keybase1.IdentifyOutcome) (confirmed bool, err error)         { return }
-func (u *idLubaUI) DisplayCryptocurrency(keybase1.Cryptocurrency)                         {}
-func (u *idLubaUI) ReportLastTrack(*keybase1.TrackSummary)                                {}
-func (u *idLubaUI) Start(string)                                                          {}
-func (u *idLubaUI) LaunchNetworkChecks(*keybase1.Identity, *keybase1.User)                {}
-func (u *idLubaUI) DisplayTrackStatement(string) error                                    { return nil }
-func (u *idLubaUI) SetStrict(b bool)                                                      {}

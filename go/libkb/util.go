@@ -1,3 +1,6 @@
+// Copyright 2015 Keybase, Inc. All rights reserved. Use of
+// this source code is governed by the included BSD license.
+
 package libkb
 
 import (
@@ -5,21 +8,37 @@ import (
 	"bytes"
 	"crypto/hmac"
 	"crypto/rand"
+	"crypto/sha256"
+	"encoding/base32"
 	"encoding/hex"
 	"fmt"
 	"io"
 	"math"
 	"math/big"
 	"os"
-	"path"
+	"os/user"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"time"
 	"unicode"
 
 	"github.com/keybase/client/go/logger"
-	keybase1 "github.com/keybase/client/protocol/go"
+	keybase1 "github.com/keybase/client/go/protocol"
 )
+
+// PrereleaseBuild can be set at compile time for prerelease builds.
+// CAUTION: Don't change the name of this variable without grepping for
+// occurrences in shell scripts!
+var PrereleaseBuild string
+
+// VersionString returns semantic version string
+func VersionString() string {
+	if PrereleaseBuild != "" {
+		return fmt.Sprintf("%s-%s", Version, PrereleaseBuild)
+	}
+	return Version
+}
 
 func ErrToOk(err error) string {
 	if err == nil {
@@ -42,7 +61,7 @@ func FileExists(path string) (bool, error) {
 
 func MakeParentDirs(filename string) error {
 
-	dir, _ := path.Split(filename)
+	dir, _ := filepath.Split(filename)
 	exists, err := FileExists(dir)
 	if err != nil {
 		G.Log.Errorf("Can't see if parent dir %s exists", dir)
@@ -152,7 +171,7 @@ type SafeWriter interface {
 func SafeWriteToFile(t SafeWriter, mode os.FileMode) error {
 	fn := t.GetFilename()
 	G.Log.Debug(fmt.Sprintf("+ Writing to %s", fn))
-	tmpfn, tmp, err := TempFile(fn, mode)
+	tmpfn, tmp, err := OpenTempFile(fn, "", mode)
 	G.Log.Debug(fmt.Sprintf("| Temporary file generated: %s", tmpfn))
 	if err != nil {
 		return err
@@ -178,15 +197,28 @@ func SafeWriteToFile(t SafeWriter, mode os.FileMode) error {
 
 // Pluralize returns pluralized string with value.
 // For example,
-//   Pluralize(1, "zebra", "zebras") => "1 zebra"
-//   Pluralize(2, "zebra", "zebras") => "2 zebras"
-func Pluralize(n int, singular string, plural string) string {
+//   Pluralize(1, "zebra", "zebras", true) => "1 zebra"
+//   Pluralize(2, "zebra", "zebras", true) => "2 zebras"
+//   Pluralize(2, "zebra", "zebras", false) => "zebras"
+func Pluralize(n int, singular string, plural string, nshow bool) string {
 	if n == 1 {
-		return fmt.Sprintf("%d %s", n, singular)
+		if nshow {
+			return fmt.Sprintf("%d %s", n, singular)
+		}
+		return singular
 	}
-	return fmt.Sprintf("%d %s", n, plural)
+	if nshow {
+		return fmt.Sprintf("%d %s", n, plural)
+	}
+	return plural
 }
 
+// Contains returns true if string is contained in string slice
+func Contains(s string, list []string) bool {
+	return IsIn(s, list, false)
+}
+
+// IsIn checks for needle in haystack, ci means case-insensitive.
 func IsIn(needle string, haystack []string, ci bool) bool {
 	for _, h := range haystack {
 		if (ci && Cicmp(h, needle)) || (!ci && h == needle) {
@@ -257,30 +289,6 @@ func IsArmored(buf []byte) bool {
 	return bytes.HasPrefix(bytes.TrimSpace(buf), []byte("-----"))
 }
 
-var clearStart = []byte("-----BEGIN PGP SIGNED MESSAGE-----")
-
-func IsClearsign(p *Peeker) bool {
-	// there should be a newline at the start, so add 1 to length.
-	// (but this will accept a message without the newline)
-	start := make([]byte, len(clearStart)+1)
-	_, err := p.Peek(start)
-	if err != nil {
-		return false
-	}
-	return bytes.HasPrefix(bytes.TrimSpace(start), clearStart)
-}
-
-func PGPDetect(p *Peeker) (armored, clearsign bool) {
-	start := make([]byte, len(clearStart)+1)
-	_, err := p.Peek(start)
-	if err != nil {
-		return
-	}
-	clearsign = bytes.HasPrefix(bytes.TrimSpace(start), clearStart)
-	armored = IsArmored(start)
-	return
-}
-
 func RandInt64() (int64, error) {
 	max := big.NewInt(math.MaxInt64)
 	x, err := rand.Int(rand.Reader, max)
@@ -307,13 +315,6 @@ func RandIntn(n int) int {
 	return x % n
 }
 
-// OpenLogFile opens the standard Keybase logfile, and returns its
-// name, its File object, or an Error if it didn't work out.
-func OpenLogFile() (name string, file *os.File, err error) {
-	name = G.Env.GetLogFile()
-	return logger.OpenLogFile(name)
-}
-
 // MakeURI makes a URI string out of the given protocol and
 // host strings, adding necessary punctuation in between.
 func MakeURI(prot string, host string) string {
@@ -324,4 +325,150 @@ func MakeURI(prot string, host string) string {
 		prot += ":"
 	}
 	return prot + "//" + host
+}
+
+// RemoveNilErrors returns error slice with ni errors removed.
+func RemoveNilErrors(errs []error) []error {
+	var r []error
+	for _, err := range errs {
+		if err != nil {
+			r = append(r, err)
+		}
+	}
+	return r
+}
+
+// CombineErrors returns a single error for multiple errors, or nil if none.
+func CombineErrors(errs ...error) error {
+	errs = RemoveNilErrors(errs)
+	if len(errs) == 0 {
+		return nil
+	} else if len(errs) == 1 {
+		return errs[0]
+	}
+
+	msgs := []string{}
+	for _, err := range errs {
+		msgs = append(msgs, err.Error())
+	}
+	return fmt.Errorf("There were multiple errors: %s", strings.Join(msgs, "; "))
+}
+
+// IsDirEmpty returns whether directory has any files.
+func IsDirEmpty(dir string) (bool, error) {
+	f, err := os.Open(dir)
+	if err != nil {
+		return false, err
+	}
+	defer f.Close()
+
+	_, err = f.Readdir(1)
+	if err == io.EOF {
+		return true, nil
+	}
+	return false, err // Either not empty or error, suits both cases
+}
+
+// RandString returns random (base32) string with prefix.
+func RandString(prefix string, numbytes int) (string, error) {
+	buf, err := RandBytes(numbytes)
+	if err != nil {
+		return "", err
+	}
+	str := base32.StdEncoding.EncodeToString(buf)
+	if prefix != "" {
+		str = strings.Join([]string{prefix, str}, "")
+	}
+	return str, nil
+}
+
+func Trace(log logger.Logger, msg string, f func() error) func() {
+	log.Debug("+ %s", msg)
+	return func() { log.Debug("- %s -> %s", msg, ErrToOk(f())) }
+}
+
+func (g *GlobalContext) Trace(msg string, f func() error) func() {
+	return Trace(g.Log, msg, f)
+}
+
+// SplitByRunes splits string by runes
+func SplitByRunes(s string, separators []rune) []string {
+	f := func(r rune) bool {
+		for _, s := range separators {
+			if r == s {
+				return true
+			}
+		}
+		return false
+	}
+	return strings.FieldsFunc(s, f)
+}
+
+// SplitPath return string split by path separator: SplitPath("/a/b/c") => []string{"a", "b", "c"}
+func SplitPath(s string) []string {
+	return SplitByRunes(s, []rune{filepath.Separator})
+}
+
+// IsSystemAdminUser returns true if current user is root or admin (system user, not Keybase user).
+// WARNING: You shouldn't rely on this for security purposes.
+func IsSystemAdminUser() (isAdminUser bool, match string, err error) {
+	u, err := user.Current()
+	if err != nil {
+		return
+	}
+
+	if u.Uid == "0" {
+		match = "Uid: 0"
+		isAdminUser = true
+		return
+	}
+	return
+}
+
+// DigestForFileAtPath returns a SHA256 digest for file at specified path
+func DigestForFileAtPath(path string) (string, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+	return Digest(f)
+}
+
+// Digest returns a SHA256 digest
+func Digest(r io.Reader) (string, error) {
+	hasher := sha256.New()
+	if _, err := io.Copy(hasher, r); err != nil {
+		return "", err
+	}
+	digest := hex.EncodeToString(hasher.Sum(nil))
+	return digest, nil
+}
+
+// TimeLog calls out with the time since start.  Use like this:
+//    defer TimeLog("MyFunc", time.Now(), e.G().Log.Warning)
+func TimeLog(name string, start time.Time, out func(string, ...interface{})) {
+	out("* %s: %s", name, time.Since(start))
+}
+
+func WhitespaceNormalize(s string) string {
+	v := regexp.MustCompile(`\s+`).Split(s, -1)
+	if len(v) > 0 && len(v[0]) == 0 {
+		v = v[1:]
+	}
+	if len(v) > 0 && len(v[len(v)-1]) == 0 {
+		v = v[0 : len(v)-1]
+	}
+	return strings.Join(v, " ")
+}
+
+// JoinPredicate joins strings with predicate
+func JoinPredicate(arr []string, delimeter string, f func(s string) bool) string {
+	arrNew := make([]string, 0, len(arr))
+	for _, s := range arr {
+		if f(s) {
+			arrNew = append(arrNew, s)
+		}
+	}
+	return strings.Join(arrNew, delimeter)
 }

@@ -1,3 +1,6 @@
+// Copyright 2015 Keybase, Inc. All rights reserved. Use of
+// this source code is governed by the included BSD license.
+
 package libkb
 
 import (
@@ -5,7 +8,7 @@ import (
 	"regexp"
 	"strings"
 
-	keybase1 "github.com/keybase/client/protocol/go"
+	keybase1 "github.com/keybase/client/go/protocol"
 	jsonw "github.com/keybase/go-jsonw"
 )
 
@@ -25,6 +28,8 @@ const (
 func NewRedditChecker(p RemoteProofChainLink) (*RedditChecker, ProofError) {
 	return &RedditChecker{p}, nil
 }
+
+func (rc *RedditChecker) GetTorError() ProofError { return nil }
 
 func (rc *RedditChecker) CheckHint(h SigHint) ProofError {
 	if strings.HasPrefix(strings.ToLower(h.apiURL), RedditSub) {
@@ -144,14 +149,19 @@ func urlReencode(s string) string {
 
 type RedditServiceType struct{ BaseServiceType }
 
-func (t RedditServiceType) AllStringKeys() []string     { return t.BaseAllStringKeys(t) }
-func (t RedditServiceType) PrimaryStringKeys() []string { return t.BasePrimaryStringKeys(t) }
+func (t RedditServiceType) AllStringKeys() []string { return t.BaseAllStringKeys(t) }
 
-func (t RedditServiceType) CheckUsername(s string) (err error) {
-	if !regexp.MustCompile(`^(?i:[a-z0-9_-]{3,20})$`).MatchString(s) {
-		err = BadUsernameError{s}
+var redditUsernameRegexp = regexp.MustCompile(`^(?i:[a-z0-9_-]{3,20})$`)
+
+func (t RedditServiceType) NormalizeUsername(s string) (string, error) {
+	if !redditUsernameRegexp.MatchString(s) {
+		return "", BadUsernameError{s}
 	}
-	return
+	return strings.ToLower(s), nil
+}
+
+func (t RedditServiceType) NormalizeRemoteName(s string) (ret string, err error) {
+	return t.NormalizeUsername(s)
 }
 
 func (t RedditServiceType) ToChecker() Checker {
@@ -192,7 +202,7 @@ func (t RedditServiceType) FormatProofText(ppr *PostProofRes) (res string, err e
 
 func (t RedditServiceType) DisplayName(un string) string { return "Reddit" }
 
-func (t RedditServiceType) RecheckProofPosting(tryNumber int, status keybase1.ProofStatus) (warning *Markup, err error) {
+func (t RedditServiceType) RecheckProofPosting(tryNumber int, status keybase1.ProofStatus, _ string) (warning *Markup, err error) {
 	warning, err = t.BaseRecheckProofPosting(tryNumber, status)
 	return
 }
@@ -208,7 +218,7 @@ func (t RedditServiceType) CheckProofText(text string, id keybase1.SigID, sig st
 func init() {
 	RegisterServiceType(RedditServiceType{})
 	RegisterSocialNetwork("reddit")
-	RegisterProofCheckHook("reddit",
+	RegisterMakeProofCheckerFunc("reddit",
 		func(l RemoteProofChainLink) (ProofChecker, ProofError) {
 			return NewRedditChecker(l)
 		})

@@ -2,11 +2,16 @@
 
 protocol ctl {
 
-	import idl "common.avdl";
+  import idl "common.avdl";
 
-	void stop();
-	void logRotate();
-	void setLogLevel(LogLevel level);
-	void reload();
+  enum ExitCode {
+    OK_0,
+    NOTOK_2,
+    RESTART_4
+  }
 
+  void stop(int sessionID, ExitCode exitCode);
+  void logRotate(int sessionID);
+  void reload(int sessionID);
+  void dbNuke(int sessionID);
 }

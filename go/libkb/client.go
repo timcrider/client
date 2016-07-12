@@ -1,9 +1,13 @@
+// Copyright 2015 Keybase, Inc. All rights reserved. Use of
+// this source code is governed by the included BSD license.
+
 package libkb
 
 import (
 	"crypto/tls"
 	"crypto/x509"
 	"fmt"
+	"h12.me/socks"
 	"net/http"
 	"net/http/cookiejar"
 	"net/url"
@@ -66,11 +70,15 @@ func ShortCA(raw string) string {
 	return strings.Join(parts, " ") + "..."
 }
 
-// Pull the information out of the environment configuration,
+// GenClientConfigForInternalAPI pulls the information out of the environment configuration,
 // and build a Client config that will be used in all API server
 // requests
-func (e *Env) GenClientConfig() (*ClientConfig, error) {
+func (e *Env) GenClientConfigForInternalAPI() (*ClientConfig, error) {
 	serverURI := e.GetServerURI()
+
+	if e.GetTorMode().Enabled() {
+		serverURI = e.GetTorHiddenAddress()
+	}
 
 	if serverURI == "" {
 		err := fmt.Errorf("Cannot find a server URL")
@@ -80,6 +88,15 @@ func (e *Env) GenClientConfig() (*ClientConfig, error) {
 	if err != nil {
 		return nil, err
 	}
+
+	if url.Scheme == "" {
+		return nil, fmt.Errorf("Server URL missing Scheme")
+	}
+
+	if url.Host == "" {
+		return nil, fmt.Errorf("Server URL missing Host")
+	}
+
 	useTLS := (url.Scheme == "https")
 	host, port, e2 := SplitHost(url.Host)
 	if e2 != nil {
@@ -101,27 +118,42 @@ func (e *Env) GenClientConfig() (*ClientConfig, error) {
 		return nil, err
 	}
 
-	ret := &ClientConfig{host, port, useTLS, url, rootCAs, url.Path, true, HTTPDefaultTimeout}
+	ret := &ClientConfig{host, port, useTLS, url, rootCAs, url.Path, true, e.GetAPITimeout()}
 	return ret, nil
 }
 
-func NewClient(config *ClientConfig, needCookie bool) *Client {
+func (e *Env) GenClientConfigForScrapers() (*ClientConfig, error) {
+	return &ClientConfig{
+		UseCookies: true,
+		Timeout:    e.GetScraperTimeout(),
+	}, nil
+}
+
+func NewClient(e *Env, config *ClientConfig, needCookie bool) *Client {
 	var jar *cookiejar.Jar
-	if needCookie && (config == nil || config.UseCookies) {
+	if needCookie && (config == nil || config.UseCookies) && e.GetTorMode().UseCookies() {
 		jar, _ = cookiejar.New(nil)
 	}
 
 	var xprt *http.Transport
 	var timeout time.Duration
 
-	if config != nil && config.RootCAs != nil {
-		xprt = &http.Transport{
-			Proxy:           http.ProxyFromEnvironment,
-			TLSClientConfig: &tls.Config{RootCAs: config.RootCAs},
+	if (config != nil && config.RootCAs != nil) || e.GetTorMode().Enabled() {
+		xprt = &http.Transport{}
+		if config != nil && config.RootCAs != nil {
+			xprt.TLSClientConfig = &tls.Config{RootCAs: config.RootCAs}
 		}
-		timeout = config.Timeout
-	} else {
+		if e.GetTorMode().Enabled() {
+			dialSocksProxy := socks.DialSocksProxy(socks.SOCKS5, e.GetTorProxy())
+			xprt.Dial = dialSocksProxy
+		} else {
+			xprt.Proxy = http.ProxyFromEnvironment
+		}
+	}
+	if config == nil || config.Timeout == 0 {
 		timeout = HTTPDefaultTimeout
+	} else {
+		timeout = config.Timeout
 	}
 
 	ret := &Client{

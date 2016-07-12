@@ -21,7 +21,6 @@ DerivedData
 Pods
 
 Install/build/*
-Install/Updater/site/*.html
-Install/Fuse/osxfuse
-Install/brew/*.bottle.tar.gz
-copyui.sh
+Install/bin
+osxfuse
+*.bottle.tar.gz

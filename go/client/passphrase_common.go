@@ -1,8 +1,14 @@
+// Copyright 2015 Keybase, Inc. All rights reserved. Use of
+// this source code is governed by the included BSD license.
+
 package client
 
 import (
-	keybase1 "github.com/keybase/client/protocol/go"
-	"github.com/maxtaco/go-framed-msgpack-rpc/rpc2"
+	"golang.org/x/net/context"
+
+	"github.com/keybase/client/go/libkb"
+	keybase1 "github.com/keybase/client/go/protocol"
+	rpc "github.com/keybase/go-framed-msgpack-rpc"
 )
 
 func newChangeArg(newPassphrase string, force bool) keybase1.PassphraseChangeArg {
@@ -12,16 +18,16 @@ func newChangeArg(newPassphrase string, force bool) keybase1.PassphraseChangeArg
 	}
 }
 
-func passphraseChange(arg keybase1.PassphraseChangeArg) error {
-	cli, err := GetAccountClient()
+func passphraseChange(g *libkb.GlobalContext, arg keybase1.PassphraseChangeArg) error {
+	cli, err := GetAccountClient(g)
 	if err != nil {
 		return err
 	}
-	protocols := []rpc2.Protocol{
-		NewSecretUIProtocol(),
+	protocols := []rpc.Protocol{
+		NewSecretUIProtocol(g),
 	}
-	if err := RegisterProtocols(protocols); err != nil {
+	if err := RegisterProtocolsWithContext(protocols, g); err != nil {
 		return err
 	}
-	return cli.PassphraseChange(arg)
+	return cli.PassphraseChange(context.TODO(), arg)
 }

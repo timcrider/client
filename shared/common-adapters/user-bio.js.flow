@@ -1,0 +1,26 @@
+/* @flow */
+
+import type {AvatarSize} from './avatar'
+import type {SimpleProofState} from '../constants/tracker'
+
+export type UserInfo = {
+  fullname: string,
+  followersCount: number,
+  followingCount: number,
+  followsYou: boolean,
+  bio: string,
+  avatar: ?string,
+  location: string
+}
+
+export type Props = {
+  type: 'Tracker' | 'Profile',
+  avatarSize: AvatarSize,
+  style?: Object,
+  username: ?string,
+  userInfo: ?UserInfo,
+  trackerState: SimpleProofState,
+  currentlyFollowing: boolean
+}
+
+export default class Render extends React$Component<void, Props, void> {}
