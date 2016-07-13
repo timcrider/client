@@ -7,7 +7,7 @@ import {defaultKBFSPath} from '../constants/config'
 import {badgeApp} from './notifications'
 import {canonicalizeUsernames, parseFolderNameToUsers} from '../util/kbfs'
 import _ from 'lodash'
-import type {Folder, favoriteGetFavoritesRpc, favoriteFavoriteAddRpc, favoriteFavoriteIgnoreRpc, FavoritesResult} from '../constants/types/flow-types'
+import type {Folder, apiserverGetRpc, favoriteFavoriteAddRpc, favoriteFavoriteIgnoreRpc, apiserverGetResult} from '../constants/types/flow-types'
 import type {Dispatch} from '../constants/types/flux'
 import type {FavoriteAdd, FavoriteList, FavoriteIgnore, State} from '../constants/favorite'
 import type {UserList} from '../common-adapters/usernames'
@@ -119,12 +119,37 @@ let previousNotify = null
 
 export function favoriteList (): (dispatch: Dispatch) => void {
   return (dispatch, getState) => {
-    const params : favoriteGetFavoritesRpc = {
-      method: 'favorite.getFavorites',
-      callback: (error, favorites: FavoritesResult) => {
+    const params : apiserverGetRpc = {
+      method: 'apiserver.Get',
+      param: {
+        endpoint: 'kbfs/favorite/list',
+        args: [{key: 'problems', value: '1'}],
+      },
+      callback: (error, result: apiserverGetResult) => {
         if (error) {
-          console.warn('Err in favorite.getFavorites', error)
+          console.warn('Err in getFavorites', error)
           return
+        }
+
+        let json
+        try {
+          json = JSON.parse(result.body)
+        } catch (err) {
+          console.warn('Invalid json from getFavorites: ', err)
+          return
+        }
+
+        [json.favorites, json.ignored, json.new].forEach(folders => {
+          folders.forEach(folder => {
+            // folder.rekey = folder.problem_set && folder.problem_set.solution_kids && Object.keys(folder.problem_set.solution_kids).length
+            folder.rekey = true
+          })
+        })
+
+        const favorites = {
+          favoriteFolders: json.favorites,
+          ignoredFolders: json.ignored,
+          newFolders: json.new,
         }
 
         let folders = []
@@ -132,19 +157,19 @@ export function favoriteList (): (dispatch: Dispatch) => void {
         if (favorites) {
           if (favorites.favoriteFolders) {
             favorites.favoriteFolders.forEach(f => {
-              folders.push({folder: f, meta: null})
+              folders.push({folder: f, meta: f.rekey ? 'rekey' : null})
             })
           }
 
           if (favorites.newFolders) {
             favorites.newFolders.forEach(f => {
-              folders.push({folder: f, meta: 'new'})
+              folders.push({folder: f, meta: f.rekey ? 'rekey' : 'new'})
             })
           }
 
           if (favorites.ignoredFolders) {
             favorites.ignoredFolders.forEach(f => {
-              folders.push({folder: f, meta: 'ignored'})
+              folders.push({folder: f, meta: f.rekey ? 'rekey' : 'ignored'})
             })
           }
         }
