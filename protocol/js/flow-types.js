@@ -359,6 +359,13 @@ export type ExtendedStatus = {
   platformInfo: PlatformInfo;
 }
 
+export type FSEditListRequest = {
+  folder: Folder;
+  maxNumItems: int;
+  maxLocalTime: Time;
+  requestID: int;
+}
+
 export type FSErrorType =
     0 // ACCESS_DENIED_0
   | 1 // USER_NOT_FOUND_1
@@ -380,6 +387,8 @@ export type FSNotification = {
   notificationType: FSNotificationType;
   errorType: FSErrorType;
   params: {[key: string]: string};
+  writerUid: UID;
+  localTime: Time;
 }
 
 export type FSNotificationType =
@@ -390,6 +399,9 @@ export type FSNotificationType =
   | 4 // REKEYING_4
   | 5 // CONNECTION_5
   | 6 // MD_READ_SUCCESS_6
+  | 7 // FILE_CREATED_7
+  | 8 // FILE_MODIFIED_8
+  | 9 // FILE_DELETED_9
 
 export type FSStatusCode =
     0 // START_0
@@ -716,6 +728,29 @@ export function NotifyFSFSActivityRpc (request: $Exact<{
   incomingCallMap?: incomingCallMapType,
   callback?: (null | (err: ?any) => void)}>) {
   engine.rpc({...request, method: 'NotifyFS.FSActivity'})
+}
+export type NotifyFSFSEditListResponseRpcParam = $Exact<{
+  edits?: ?Array<FSNotification>,
+  requestID: int
+}>
+
+export function NotifyFSFSEditListResponseRpc (request: $Exact<{
+  param: NotifyFSFSEditListResponseRpcParam,
+  waitingHandler?: (waiting: boolean, method: string, sessionID: string) => void,
+  incomingCallMap?: incomingCallMapType,
+  callback?: (null | (err: ?any) => void)}>) {
+  engine.rpc({...request, method: 'NotifyFS.FSEditListResponse'})
+}
+export type NotifyFSRequestFSEditListRequestRpcParam = $Exact<{
+  req: FSEditListRequest
+}>
+
+export function NotifyFSRequestFSEditListRequestRpc (request: $Exact<{
+  param: NotifyFSRequestFSEditListRequestRpcParam,
+  waitingHandler?: (waiting: boolean, method: string, sessionID: string) => void,
+  incomingCallMap?: incomingCallMapType,
+  callback?: (null | (err: ?any) => void)}>) {
+  engine.rpc({...request, method: 'NotifyFSRequest.FSEditListRequest'})
 }
 export type NotifyFavoritesFavoritesChangedRpcParam = $Exact<{
   uid: UID
@@ -2137,6 +2172,18 @@ export function identifyUiStartRpc (request: $Exact<{
   incomingCallMap?: incomingCallMapType,
   callback?: (null | (err: ?any) => void)}>) {
   engine.rpc({...request, method: 'identifyUi.start'})
+}
+export type kbfsFSEditListRpcParam = $Exact<{
+  edits?: ?Array<FSNotification>,
+  requestID: int
+}>
+
+export function kbfsFSEditListRpc (request: $Exact<{
+  param: kbfsFSEditListRpcParam,
+  waitingHandler?: (waiting: boolean, method: string, sessionID: string) => void,
+  incomingCallMap?: incomingCallMapType,
+  callback?: (null | (err: ?any) => void)}>) {
+  engine.rpc({...request, method: 'kbfs.FSEditList'})
 }
 export type kbfsFSEventRpcParam = $Exact<{
   event: FSNotification
@@ -3686,6 +3733,8 @@ export type rpc =
   | Kex2ProvisioneeHelloRpc
   | Kex2ProvisionerKexStartRpc
   | NotifyFSFSActivityRpc
+  | NotifyFSFSEditListResponseRpc
+  | NotifyFSRequestFSEditListRequestRpc
   | NotifyFavoritesFavoritesChangedRpc
   | NotifyKeyfamilyKeyfamilyChangedRpc
   | NotifyPaperKeyPaperKeyCachedRpc
@@ -3772,6 +3821,7 @@ export type rpc =
   | identifyUiReportLastTrackRpc
   | identifyUiReportTrackTokenRpc
   | identifyUiStartRpc
+  | kbfsFSEditListRpc
   | kbfsFSEventRpc
   | logRegisterLoggerRpc
   | logUiLogRpc
@@ -4670,6 +4720,16 @@ export type incomingCallMapType = $Exact<{
       result: () => void
     }
   ) => void,
+  'keybase.1.kbfs.FSEditList'?: (
+    params: $Exact<{
+      edits?: ?Array<FSNotification>,
+      requestID: int
+    }>,
+    response: {
+      error: (err: RPCError) => void,
+      result: () => void
+    }
+  ) => void,
   'keybase.1.Kex2Provisionee.hello'?: (
     params: $Exact<{
       uid: UID,
@@ -5096,6 +5156,21 @@ export type incomingCallMapType = $Exact<{
   'keybase.1.NotifyFS.FSActivity'?: (
     params: $Exact<{
       notification: FSNotification
+    }> /* ,
+    response: {} // Notify call
+    */
+  ) => void,
+  'keybase.1.NotifyFS.FSEditListResponse'?: (
+    params: $Exact<{
+      edits?: ?Array<FSNotification>,
+      requestID: int
+    }> /* ,
+    response: {} // Notify call
+    */
+  ) => void,
+  'keybase.1.NotifyFSRequest.FSEditListRequest'?: (
+    params: $Exact<{
+      req: FSEditListRequest
     }> /* ,
     response: {} // Notify call
     */

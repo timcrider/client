@@ -6,4 +6,6 @@ protocol NotifyFS {
   @notify("")
   void FSActivity(FSNotification notification);
 
+  @notify("")
+  void FSEditListResponse(array<FSNotification> edits, int requestID);
 }
