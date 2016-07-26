@@ -1,7 +1,8 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <Wix xmlns="http://schemas.microsoft.com/wix/2006/wi"
      xmlns:bal="http://schemas.microsoft.com/wix/BalExtension"
-     xmlns:util="http://schemas.microsoft.com/wix/UtilExtension">
+     xmlns:util="http://schemas.microsoft.com/wix/UtilExtension"
+     xmlns:netfx='http://schemas.microsoft.com/wix/NetFxExtension'>
   <Bundle Name="Keybase" Version="$(env.KEYBASE_WINVER)" Manufacturer="Keybase, Inc." UpgradeCode="418432ab-0366-40fd-a396-8cc0c4200252">
     <Variable Name="DokanProduct64" Type="string" Value="{65A3A964-3DC3-0100-0000-160621082245}" />
     <Variable Name="DokanProduct86" Type="string" Value="{65A3A986-3DC3-0100-0000-160621082245}" />
@@ -136,9 +137,54 @@
                  Format="raw"
                  Win64="yes"
                  />
+    
+    <util:RegistrySearch Id="vcredist_2015_x86_check" Root="HKLM" Key="SOFTWARE\Microsoft\DevDiv\VC\Servicing\14.0\RuntimeMinimum" Value="Install" Variable="vcredist_2015_x86_installed" Win64="no"/>
+    <util:RegistrySearch Id="vcredist_2015_x86_versioncheck" Root="HKLM" Key="SOFTWARE\Classes\Installer\Dependencies\Microsoft.VS.VC_RuntimeMinimumVSU_x86,v14" Value="Version" Variable="vcredist_2015_x86_version" Result="exists" Win64="no"/>
+    <util:RegistrySearch Id="vcredist_2015_x86_versionnumbercheck" Root="HKLM" Key="SOFTWARE\Classes\Installer\Dependencies\Microsoft.VS.VC_RuntimeMinimumVSU_x86,v14" Value="Version" Variable="vcredist_2015_x86_versionnumber" Result="value" Win64="no"/>
+
+    <util:RegistrySearch Id="vcredist_2015_x64_check" Root="HKLM" Key="SOFTWARE\Microsoft\DevDiv\VC\Servicing\14.0\RuntimeMinimum" Value="Install" Variable="vcredist_2015_x64_installed" Win64="yes"/>
+    <util:RegistrySearch Id="vcredist_2015_x64_versioncheck" Root="HKLM" Key="SOFTWARE\Classes\Installer\Dependencies\Microsoft.VS.VC_RuntimeMinimumVSU_amd64,v14" Value="Version" Variable="vcredist_2015_x64_version" Result="exists" Win64="yes"/>
+    <util:RegistrySearch Id="vcredist_2015_x64_versionnumbercheck" Root="HKLM" Key="SOFTWARE\Classes\Installer\Dependencies\Microsoft.VS.VC_RuntimeMinimumVSU_amd64,v14" Value="Version" Variable="vcredist_2015_x64_versionnumber" Result="value" Win64="yes"/>
+
+    <bal:Condition Message="Installation failed because your version of Windows is too old. Dokan requires Windows 7 SP1 or newer."><![CDATA[Installed OR VersionNT > v6.1 OR (VersionNT = v6.1 AND ServicePackLevel >= 1)]]></bal:Condition>
 
 
     <Chain>
+      <PackageGroupRef Id="NetFx40Web"/>
+
+      <ExePackage Id="vcredist_2015_x86.exe"
+                  Name="vc_redist.x86.exe"
+                  InstallCommand="/norestart /q /chainingpackage ADMINDEPLOYMENT"
+                  RepairCommand="/norestart /q /chainingpackage ADMINDEPLOYMENT"
+                  UninstallCommand="/norestart /q /chainingpackage ADMINDEPLOYMENT"
+                  Protocol="netfx4"
+                  Permanent="yes"
+                  DetectCondition="vcredist_2015_x86_installed AND vcredist_2015_x86_version AND vcredist_2015_x86_versionnumber &gt;= v14.0.23918"
+                  PerMachine="yes"
+                  Vital="yes"
+                  Cache="no"
+                  SuppressSignatureVerification="yes"
+                  SourceFile="Redist\VCRedist_2015\vc_redist.x86.exe"
+                  DownloadUrl="https://download.microsoft.com/download/2/6/8/268f7be7-8d2a-42d6-a823-5c6941a3d70a/vc_redist.x86.exe"
+      />
+
+      <ExePackage Id="vcredist_2015_x64.exe"
+                  Name="vc_redist.x64.exe"
+                  InstallCommand="/norestart /q /chainingpackage ADMINDEPLOYMENT"
+                  RepairCommand="/norestart /q /chainingpackage ADMINDEPLOYMENT"
+                  UninstallCommand="/norestart /q /chainingpackage ADMINDEPLOYMENT"
+                  Protocol="netfx4"
+                  Permanent="yes"
+                  InstallCondition="VersionNT64"
+                  DetectCondition="vcredist_2015_x64_installed AND vcredist_2015_x64_version AND vcredist_2015_x64_versionnumber &gt;= v14.0.23918"
+                  PerMachine="yes"
+                  Vital="yes"
+                  Cache="yes"
+                  SuppressSignatureVerification="yes"
+                  SourceFile="Redist\VCRedist_2015\vc_redist.x64.exe"
+                  DownloadUrl="https://download.microsoft.com/download/6/3/a/63abaf83-2ca6-4460-90d7-12de8e815b1a/vc_redist.x64.exe"
+                  />
+
       <!-- Run whatever quiet uninstaller we detected. -->
       <ExePackage
         SourceFile="$(env.GOPATH)\src\github.com\keybase\client\go\tools\runquiet\runquiet.exe"
@@ -158,7 +204,7 @@
            if ( uninstalling and TargetDokanUninstallKey <> [DokanUninstallCode])
         -->
       <ExePackage
-        SourceFile="$(env.DOKAN_PATH)\dokan_wix\DokanSetup_redist.exe"
+        SourceFile="$(env.DOKAN_BIN)\dokan_wix\DokanSetup.exe"
           InstallCommand="/quiet"
           UninstallCommand="/quiet /uninstall"
           DetectCondition="DokanUninstallString and NOT (WixBundleAction=3 AND ( TargetDokanUninstallKey &lt;&gt; DokanProduct64 AND TargetDokanUninstallKey &lt;&gt; DokanProduct86 ))"
