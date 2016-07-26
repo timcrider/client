@@ -204,7 +204,7 @@
            if ( uninstalling and TargetDokanUninstallKey <> [DokanUninstallCode])
         -->
       <ExePackage
-        SourceFile="$(env.DOKAN_BIN)\dokan_wix\DokanSetup.exe"
+        SourceFile="$(env.DOKAN_PATH)\dokan_wix\DokanSetup.exe"
           InstallCommand="/quiet"
           UninstallCommand="/quiet /uninstall"
           DetectCondition="DokanUninstallString and NOT (WixBundleAction=3 AND ( TargetDokanUninstallKey &lt;&gt; DokanProduct64 AND TargetDokanUninstallKey &lt;&gt; DokanProduct86 ))"
