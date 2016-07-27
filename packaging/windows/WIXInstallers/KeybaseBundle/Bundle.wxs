@@ -4,8 +4,8 @@
      xmlns:util="http://schemas.microsoft.com/wix/UtilExtension">
   <Bundle Name="Keybase" Version="$(env.KEYBASE_WINVER)" Manufacturer="Keybase, Inc." UpgradeCode="418432ab-0366-40fd-a396-8cc0c4200252">
     <!-- Dokany Product Codes: v1.0.0-RC4.3 -->
-    <Variable Name="DokanProduct64_RC4.2" Type="string" Value="{65A3A964-3DC3-0100-0000-160621082245}" />
-    <Variable Name="DokanProduct86_RC4.2" Type="string" Value="{65A3A986-3DC3-0100-0000-160621082245}" />
+    <Variable Name="DokanProduct64_RC4.3" Type="string" Value="{65A3A964-3DC3-0100-0000-160621082245}" />
+    <Variable Name="DokanProduct86_RC4.3" Type="string" Value="{65A3A986-3DC3-0100-0000-160621082245}" />
     <!-- Dokany Product Codes: v1.0.0-Keybase-RC4.4 Marinkobanic BSOD Fixes -->
     <Variable Name="DokanProduct64" Type="string" Value="{65A3A964-3DC3-0100-0000-160727115913}" />
     <Variable Name="DokanProduct86" Type="string" Value="{65A3A986-3DC3-0100-0000-160727115913}" />
@@ -82,43 +82,43 @@
                  Format="raw"
                  Win64="yes"
                  />
-    <!-- Dokany Product Codes: v1.0.0-RC4.2 -->
+    <!-- Dokany Product Codes: v1.0.0-RC4.3 -->
     
-    <util:RegistrySearch Id="DokanUninstallx86_RC4.2"
+    <util:RegistrySearch Id="DokanUninstallx86_RC4.3"
                  After="InnoUninstall364"
                  Variable="DokanUninstallString"
                  Condition="NOT DokanUninstallString"
                  Root="HKLM"
-                 Key="SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\[DokanProduct86_RC4.2]"
+                 Key="SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\[DokanProduct86_RC4.3]"
                  Value="UninstallString"
                  Format="raw"
                  />
-    <util:RegistrySearch Id="DokanUninstallx86_64_RC4.2"
-                 After="DokanUninstallx86_RC4.2"
+    <util:RegistrySearch Id="DokanUninstallx86_64_RC4.3"
+                 After="DokanUninstallx86_RC4.3"
                  Condition="NOT DokanUninstallString"
                  Variable="DokanUninstallString"
                  Root="HKLM"
-                 Key="SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\[DokanProduct86_RC4.2]"
+                 Key="SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\[DokanProduct86_RC4.3]"
                  Value="UninstallString"
                  Format="raw"
                  Win64="yes"
                  />
 
-    <util:RegistrySearch Id="DokanUninstall64_RC4.2"
-                 After="DokanUninstallx86_64_RC4.2"
+    <util:RegistrySearch Id="DokanUninstall64_RC4.3"
+                 After="DokanUninstallx86_64_RC4.3"
                  Condition="NOT DokanUninstallString"
                  Variable="DokanUninstallString"
                  Root="HKLM"
-                 Key="SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\[DokanProduct64_RC4.2]"
+                 Key="SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\[DokanProduct64_RC4.3]"
                  Value="UninstallString"
                  Format="raw"
                  />
-    <util:RegistrySearch Id="DokanUninstall64_64_RC4.2"
-                 After="DokanUninstallx86_64_RC4.2"
+    <util:RegistrySearch Id="DokanUninstall64_64_RC4.3"
+                 After="DokanUninstallx86_64_RC4.3"
                  Condition="NOT DokanUninstallString"
                  Variable="DokanUninstallString"
                  Root="HKLM"
-                 Key="SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\[DokanProduct64_RC4.2]"
+                 Key="SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\[DokanProduct64_RC4.3]"
                  Value="UninstallString"
                  Format="raw"
                  Win64="yes"
@@ -126,9 +126,9 @@
 
 
 
-    <!-- Dokany Product Codes: v1.0.0-RC4.3 -->
+    <!-- Dokany Product Codes: v1.0.0-RC4.4 MarinKobabic -->
     <util:RegistrySearch Id="DokanUninstallx86"
-                 After="DokanUninstallx86_64_RC4.2"
+                 After="DokanUninstallx86_64_RC4.3"
                  Condition="NOT DokanUninstallString"
                  Variable="DokanUninstallString"
                  Root="HKLM"
@@ -200,16 +200,17 @@
       <!-- DetectCondition is critical here, since on update this package will be invoked with /uninstall,
            (WixBundleAction=3). We want to let it uninstall (condition true) if we know the target is different,
            which the updater writes to the registry and we retrieve via TargetDokanUninstallKey. 
-           Otherwise, we block uninstall, so things will be nice and quiet. 
+           
+           Otherwise, we block uninstall by making sure this condition is false, so things will be nice and quiet. 
            
            Stated another way, we want DetectCondition to be always true after install except
-           if ( uninstalling and TargetDokanUninstallKey <> [DokanUninstallCode])
+           if ( uninstalling and TargetDokanUninstallKey == [CurrentDokan])
         -->
       <ExePackage
         SourceFile="$(env.DOKAN_PATH)\dokan_wix\DokanSetup_redist.exe"
           InstallCommand="/quiet"
           UninstallCommand="/quiet /uninstall"
-          DetectCondition="DokanUninstallString and NOT (WixBundleAction=3 AND ( TargetDokanUninstallKey &lt;&gt; DokanProduct64 AND TargetDokanUninstallKey &lt;&gt; DokanProduct86 ))"
+          DetectCondition="DokanUninstallString and NOT (WixBundleAction=3 AND ( TargetDokanUninstallKey=DokanProduct64 OR TargetDokanUninstallKey=DokanProduct86 ))"
           PerMachine="yes"
           Permanent="yes">
       </ExePackage>
