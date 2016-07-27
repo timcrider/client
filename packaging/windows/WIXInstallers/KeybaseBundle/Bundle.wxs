@@ -4,8 +4,8 @@
      xmlns:util="http://schemas.microsoft.com/wix/UtilExtension">
   <Bundle Name="Keybase" Version="$(env.KEYBASE_WINVER)" Manufacturer="Keybase, Inc." UpgradeCode="418432ab-0366-40fd-a396-8cc0c4200252">
     <!-- Dokany Product Codes: v1.0.0-RC4.3 -->
-    <Variable Name="DokanProduct64_RC4.3" Type="string" Value="{65A3A964-3DC3-0100-0000-160621082245}" />
-    <Variable Name="DokanProduct86_RC4.3" Type="string" Value="{65A3A986-3DC3-0100-0000-160621082245}" />
+    <Variable Name="DokanProduct64_RC4.2" Type="string" Value="{65A3A964-3DC3-0100-0000-160621082245}" />
+    <Variable Name="DokanProduct86_RC4.2" Type="string" Value="{65A3A986-3DC3-0100-0000-160621082245}" />
     <!-- Dokany Product Codes: v1.0.0-Keybase-RC4.4 Marinkobanic BSOD Fixes -->
     <Variable Name="DokanProduct64" Type="string" Value="{65A3A964-3DC3-0100-0000-160727115913}" />
     <Variable Name="DokanProduct86" Type="string" Value="{65A3A986-3DC3-0100-0000-160727115913}" />
@@ -26,7 +26,7 @@
     </BootstrapperApplicationRef>
     <!-- These two are for the most recent KBFS -->
     <util:RegistrySearch Id="InnoUninstall"
-                 Variable="LegacyUninstallString"        
+                 Variable="InnoUninstallString"        
                  Root="HKLM"
                  Key="SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\{357F272E-BE0E-409F-8E39-0BB9827F5716}_is1"
                  Value="QuietUninstallString"
@@ -34,8 +34,8 @@
                  />
     <util:RegistrySearch Id="InnoUninstall64"
                  After="InnoUninstall"
-                 Condition="NOT LegacyUninstallString"
-                 Variable="LegacyUninstallString"
+                 Condition="NOT InnoUninstallString"
+                 Variable="InnoUninstallString"
                  Root="HKLM"
                  Key="SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\{357F272E-BE0E-409F-8E39-0BB9827F5716}_is1"
                  Value="QuietUninstallString"
@@ -44,9 +44,9 @@
                  />
     <!-- From the old Inno installer for Dokan 0.8.0 -->
     <util:RegistrySearch Id="InnoUninstall2"
-             Variable="LegacyUninstallString"
+             Variable="InnoUninstallString"
              After="InnoUninstall64"
-             Condition="NOT LegacyUninstallString"
+             Condition="NOT InnoUninstallString"
              Root="HKLM"
              Key="SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\{DEB2E54C-C39F-4DC8-93A7-ABE0AB91DDCA}_is1"
              Value="QuietUninstallString"
@@ -54,8 +54,8 @@
                  />
     <util:RegistrySearch Id="InnoUninstall264"
                  After="InnoUninstall2"
-                 Condition="NOT LegacyUninstallString"
-                 Variable="LegacyUninstallString"
+                 Condition="NOT InnoUninstallString"
+                 Variable="InnoUninstallString"
                  Root="HKLM"
                  Key="SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\{DEB2E54C-C39F-4DC8-93A7-ABE0AB91DDCA}_is1"
                  Value="QuietUninstallString"
@@ -64,9 +64,9 @@
                  />
     <!-- From the old Inno installer for Dokan 1.0.0RC2 -->
     <util:RegistrySearch Id="InnoUninstall3"
-             Variable="LegacyUninstallString"
+             Variable="InnoUninstallString"
              After="InnoUninstall264"
-             Condition="NOT LegacyUninstallString"
+             Condition="NOT InnoUninstallString"
              Root="HKLM"
              Key="SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\{1B2672D9-2BAD-4C11-BA53-A75AF6FD7789}_is1"
              Value="QuietUninstallString"
@@ -74,60 +74,62 @@
                  />
     <util:RegistrySearch Id="InnoUninstall364"
                  After="InnoUninstall3"
-                 Condition="NOT LegacyUninstallString"
-                 Variable="LegacyUninstallString"
+                 Condition="NOT InnoUninstallString"
+                 Variable="InnoUninstallString"
                  Root="HKLM"
                  Key="SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\{1B2672D9-2BAD-4C11-BA53-A75AF6FD7789}_is1"
                  Value="QuietUninstallString"
                  Format="raw"
                  Win64="yes"
                  />
+    <!-- Dokany Product Codes: v1.0.0-RC4.2 -->
+    
+    <util:RegistrySearch Id="DokanUninstallx86_RC4.2"
+                 After="InnoUninstall364"
+                 Variable="DokanUninstallString"
+                 Condition="NOT DokanUninstallString"
+                 Root="HKLM"
+                 Key="SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\[DokanProduct86_RC4.2]"
+                 Value="UninstallString"
+                 Format="raw"
+                 />
+    <util:RegistrySearch Id="DokanUninstallx86_64_RC4.2"
+                 After="DokanUninstallx86_RC4.2"
+                 Condition="NOT DokanUninstallString"
+                 Variable="DokanUninstallString"
+                 Root="HKLM"
+                 Key="SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\[DokanProduct86_RC4.2]"
+                 Value="UninstallString"
+                 Format="raw"
+                 Win64="yes"
+                 />
+
+    <util:RegistrySearch Id="DokanUninstall64_RC4.2"
+                 After="DokanUninstallx86_64_RC4.2"
+                 Condition="NOT DokanUninstallString"
+                 Variable="DokanUninstallString"
+                 Root="HKLM"
+                 Key="SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\[DokanProduct64_RC4.2]"
+                 Value="UninstallString"
+                 Format="raw"
+                 />
+    <util:RegistrySearch Id="DokanUninstall64_64_RC4.2"
+                 After="DokanUninstallx86_64_RC4.2"
+                 Condition="NOT DokanUninstallString"
+                 Variable="DokanUninstallString"
+                 Root="HKLM"
+                 Key="SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\[DokanProduct64_RC4.2]"
+                 Value="UninstallString"
+                 Format="raw"
+                 Win64="yes"
+                 />
+
+
 
     <!-- Dokany Product Codes: v1.0.0-RC4.3 -->
-    <util:RegistrySearch Id="DokanUninstallx86_RC4.3"
-                 After="InnoUninstall364"
-                 Variable="LegacyUninstallString"
-                 Condition="NOT LegacyUninstallString"
-                 Root="HKLM"
-                 Key="SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\[DokanProduct86_RC4.3]"
-                 Value="UninstallString"
-                 Format="raw"
-                 />
-    <util:RegistrySearch Id="DokanUninstallx86_64_RC4.3"
-                 After="DokanUninstallx86_RC4.3"
-                 Condition="NOT LegacyUninstallString"
-                 Variable="LegacyUninstallString"
-                 Root="HKLM"
-                 Key="SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\[DokanProduct86_RC4.3]"
-                 Value="UninstallString"
-                 Format="raw"
-                 Win64="yes"
-                 />
-
-    <util:RegistrySearch Id="DokanUninstall64_RC4.3"
-                 After="DokanUninstallx86_64_RC4.3"
-                 Condition="NOT LegacyUninstallString"
-                 Variable="LegacyUninstallString"
-                 Root="HKLM"
-                 Key="SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\[DokanProduct64_RC4.3]"
-                 Value="UninstallString"
-                 Format="raw"
-                 />
-    <util:RegistrySearch Id="DokanUninstall64_64_RC4.3"
-                 After="DokanUninstallx86_64_RC4.3"
-                 Condition="NOT LegacyUninstallString"
-                 Variable="LegacyUninstallString"
-                 Root="HKLM"
-                 Key="SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\[DokanProduct64_RC4.3]"
-                 Value="UninstallString"
-                 Format="raw"
-                 Win64="yes"
-                 />
-
-
-
-    <!-- Dokany Product Codes: v1.0.0-Keybase-RC4.4 Marinkobanic BSOD Fixes -->
     <util:RegistrySearch Id="DokanUninstallx86"
+                 After="DokanUninstallx86_64_RC4.2"
+                 Condition="NOT DokanUninstallString"
                  Variable="DokanUninstallString"
                  Root="HKLM"
                  Key="SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\[DokanProduct86]"
@@ -188,8 +190,8 @@
       <!-- Run whatever quiet uninstaller we detected. -->
       <ExePackage
         SourceFile="$(env.GOPATH)\src\github.com\keybase\client\go\tools\runquiet\runquiet.exe"
-          InstallCommand="-wait [LegacyUninstallString] /NORESTART"
-          DetectCondition="NOT LegacyUninstallString"
+          InstallCommand="-wait [InnoUninstallString] /NORESTART"
+          DetectCondition="NOT InnoUninstallString"
           PerMachine="yes"
           Permanent="yes">
         <ExitCode Behavior="forceReboot"/>
